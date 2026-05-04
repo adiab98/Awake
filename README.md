@@ -1,9 +1,5 @@
 # Awake
 
-> **Note:** v0.1 is signed but notarization is pending Apple's queue.
-> First launch: **right-click `Awake.app` → Open** to bypass Gatekeeper. A
-> notarized v0.1.1 will ship as soon as Apple's submission clears.
-
 A tiny macOS menu-bar app that keeps your Mac awake while AI coding agents
 finish their turn — Claude Code, Codex, Cursor, OpenCode. Optionally keeps it
 running with the lid closed.
