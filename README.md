@@ -8,6 +8,10 @@ A tiny macOS menu-bar app that keeps your Mac awake while AI coding agents
 finish their turn — Claude Code, Codex, Cursor, OpenCode. Optionally keeps it
 running with the lid closed.
 
+<p align="center">
+  <img src="docs/screenshot.png" alt="Awake menu bar popover" width="420">
+</p>
+
 Detects active agent sessions by watching their session transcripts and
 CPU/network activity, then holds a power assertion so the Mac doesn't sleep
 mid-turn. You can also caffeinate manually with a timer.
