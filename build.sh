@@ -13,7 +13,7 @@ fi
 CONFIG="release"
 APP_NAME="Awake"
 BUNDLE_ID="com.diabdiab.awake"
-VERSION="1.0"
+VERSION="0.1"
 
 echo "▸ swift build -c $CONFIG (universal: arm64 + x86_64)"
 swift build -c "$CONFIG" --arch arm64 --arch x86_64
@@ -84,17 +84,17 @@ if [[ "$SIGNED_FOR_DISTRIBUTION" == "1" \
       && -n "${APPLE_ID:-}" \
       && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" \
       && "${APPLE_APP_SPECIFIC_PASSWORD}" != "$PLACEHOLDER" ]]; then
-  ZIP="build/$APP_NAME-$VERSION.zip"
+  ZIP="build/${APP_NAME}-${VERSION}.zip"
   ditto -c -k --keepParent "$OUT" "$ZIP"
 
-  echo "▸ Notarizing $ZIP…"
+  echo "▸ Notarizing ${ZIP}"
   xcrun notarytool submit "$ZIP" \
     --apple-id "$APPLE_ID" \
     --password "$APPLE_APP_SPECIFIC_PASSWORD" \
     --team-id "$TEAM_ID" \
     --wait
 
-  echo "▸ Stapling ticket to $OUT…"
+  echo "▸ Stapling ticket to ${OUT}"
   xcrun stapler staple "$OUT"
 
   # Re-zip after stapling so the released archive carries the ticket.
@@ -102,7 +102,7 @@ if [[ "$SIGNED_FOR_DISTRIBUTION" == "1" \
   ditto -c -k --keepParent "$OUT" "$ZIP"
 
   echo "✓ Notarized & stapled"
-  echo "  Release zip: $ZIP"
+  echo "  Release zip: ${ZIP}"
 else
   echo "  Skipping notarization (set APPLE_ID and APPLE_APP_SPECIFIC_PASSWORD to enable)"
 fi

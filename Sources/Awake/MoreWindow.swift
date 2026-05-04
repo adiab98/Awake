@@ -219,7 +219,7 @@ private struct MoreView: View {
 
             Spacer()
 
-            Text("Version 1.0")
+            Text("Version 0.1")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
                 .padding(.bottom, 18)

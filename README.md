@@ -1,5 +1,12 @@
 # Awake
 
+> **Note:** v0.1 is **Developer-ID signed but not yet Apple-notarized** —
+> Apple's notarization queue is currently delayed (a known issue, many devs
+> affected). On first launch macOS will say it can't verify the app; **right-click
+> `Awake.app` → Open** to bypass. macOS remembers the consent, so subsequent
+> launches are silent. A notarized v0.1.1 will ship automatically once Apple
+> processes the submission.
+
 A tiny macOS menu-bar app that keeps your Mac awake while AI coding agents
 finish their turn — Claude Code, Codex, Cursor, OpenCode. Optionally keeps it
 running with the lid closed.
@@ -13,12 +20,16 @@ Intel.
 
 ## Install
 
-Download the latest `Awake-1.0.zip` from
+Download the latest `Awake-0.1.zip` from
 [Releases](../../releases/latest), unzip, and drag `Awake.app` into
 `/Applications`.
 
-The app is signed with a Developer ID and notarized by Apple — Gatekeeper
-opens it without warnings. It lives in the menu bar; there is no Dock icon.
+First launch (until v0.1.1 ships notarized): right-click `Awake.app` → **Open**
+to acknowledge the Gatekeeper warning. The app is Developer-ID signed by
+Ahmed Diab (Apple Team `AR6D29J5FK`), so the warning only fires once. After
+that, double-clicking opens it normally.
+
+It lives in the menu bar; there is no Dock icon.
 
 ## Features
 
