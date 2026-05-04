@@ -59,12 +59,14 @@ cat > "$OUT/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Developer ID signing for distribution outside the Mac App Store. Falls back to
-# ad-hoc signing if no Developer ID identity is available (local-build mode).
-IDENTITY="${SIGNING_IDENTITY:-Developer ID Application: Ahmed Diab (AR6D29J5FK)}"
-TEAM_ID="${TEAM_ID:-AR6D29J5FK}"
+# Developer ID signing for distribution outside the Mac App Store. Set
+# SIGNING_IDENTITY (and TEAM_ID for notarization) in .env or the environment.
+# Falls back to ad-hoc signing if neither is set or the identity isn't in the
+# keychain — fine for local-only builds.
+IDENTITY="${SIGNING_IDENTITY:-}"
+TEAM_ID="${TEAM_ID:-}"
 
-if security find-identity -v -p codesigning | grep -q "$IDENTITY"; then
+if [[ -n "$IDENTITY" ]] && security find-identity -v -p codesigning | grep -q "$IDENTITY"; then
   echo "▸ Signing with Developer ID…"
   codesign --force --deep --options runtime --timestamp --sign "$IDENTITY" "$OUT"
   SIGNED_FOR_DISTRIBUTION=1
@@ -83,6 +85,7 @@ PLACEHOLDER="YOUR_APP_SPECIFIC_PASSWORD_HERE"
 if [[ "$SIGNED_FOR_DISTRIBUTION" == "1" \
       && -n "${APPLE_ID:-}" \
       && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" \
+      && -n "${TEAM_ID:-}" \
       && "${APPLE_APP_SPECIFIC_PASSWORD}" != "$PLACEHOLDER" ]]; then
   ZIP="build/${APP_NAME}-${VERSION}.zip"
   ditto -c -k --keepParent "$OUT" "$ZIP"
