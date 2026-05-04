@@ -166,6 +166,17 @@ struct MenuView: View {
 
             // Lid + display
             VStack(alignment: .leading, spacing: 6) {
+                #if APP_STORE
+                Text("Closed-lid support uses a separate helper.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Learn More") {
+                    controller.openClosedLidHelp()
+                }
+                .controlSize(.small)
+                .accessibilityHint("Opens details about Awake's separate closed-lid helper")
+                #else
                 MenuToggle(
                     title: "Stay awake with lid closed",
                     isOn: Binding(
@@ -181,6 +192,7 @@ struct MenuView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                #endif
                 MenuToggle(title: "Keep display awake",
                            isOn: $controller.preventDisplaySleep)
             }

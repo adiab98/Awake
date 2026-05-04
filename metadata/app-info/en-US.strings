@@ -1,0 +1,4 @@
+"name" = "Awake - Keep AI Agents Running";
+"subtitle" = "Keep Macs Awake for Agents";
+"privacyPolicyUrl" = "https://github.com/adiab98/Awake/blob/main/docs/privacy.md";
+"privacyPolicyText" = "Awake does not collect, sell, share, or upload personal data. Awake runs locally on your Mac and uses local file activity timestamps and process signals to keep macOS awake while supported local AI coding tools are active. Awake does not transmit transcript contents, file names, prompts, source code, or usage analytics to the developer or to third parties.";

@@ -11,7 +11,7 @@ final class AwakeControllerTests: XCTestCase {
         let defaults = UserDefaults.standard
         for key in [
             "waitForAgents", "lidGuardEnabledV2", "preventDisplaySleep",
-            "lastTimerMinutes", "hasOfferedLidSetup"
+            "lastTimerMinutes", "hasOfferedLidSetup", "enabledAgentTools"
         ] {
             defaults.removeObject(forKey: key)
         }
@@ -49,6 +49,47 @@ final class AwakeControllerTests: XCTestCase {
         XCTAssertFalse(controller.timerEnabled)
         XCTAssertEqual(controller.selectedDuration, .indefinite)
         XCTAssertEqual(power.releaseCount, 1)
+    }
+
+    func testDisablingToolClearsStaleLogActivityAndStickyHold() {
+        let power = MockPowerManager()
+        let controller = AwakeController(power: power, lid: MockLidGuard(), startServices: false)
+        controller.waitForAgents = true
+        power.reset()
+
+        controller.handleLogActivity(.codex)
+        XCTAssertTrue(controller.agentDriven)
+        XCTAssertTrue(controller.logActiveSources.contains(.codex))
+
+        controller.setTool(.codex, enabled: false)
+
+        XCTAssertFalse(controller.logActiveSources.contains(.codex))
+        XCTAssertFalse(controller.agentDriven)
+        XCTAssertFalse(controller.isCaffeinated)
+        XCTAssertEqual(power.releaseCount, 1)
+    }
+
+    func testLogOnlyActivityAppearsInBrandStatuses() {
+        let controller = AwakeController(power: MockPowerManager(), lid: MockLidGuard(), startServices: false)
+
+        controller.handleLogActivity(.codex)
+
+        XCTAssertTrue(controller.detectedBrands.contains("Codex CLI"))
+        XCTAssertTrue(controller.brandStatuses.contains { status in
+            status.brand == "Codex CLI" && status.state == "in turn" && status.isActive
+        })
+    }
+
+    func testDesktopLogActivityAppearsUnderDesktopBrand() {
+        let controller = AwakeController(power: MockPowerManager(), lid: MockLidGuard(), startServices: false)
+        controller.setTool(.codexDesktop, enabled: true)
+
+        controller.handleLogActivity(.codexDesktop)
+
+        XCTAssertTrue(controller.detectedBrands.contains("Codex Desktop"))
+        XCTAssertTrue(controller.brandStatuses.contains { status in
+            status.brand == "Codex Desktop" && status.state == "in turn" && status.isActive
+        })
     }
 
     func testRestoreLidSleepDoesNotAskForPasswordWhenAlreadyNormal() async throws {
@@ -159,6 +200,22 @@ final class AwakeControllerTests: XCTestCase {
         )
     }
 
+    func testFailedSilentLidEngageResetsPasswordlessSetupState() async throws {
+        let lid = MockLidGuard(status: .installed)
+        lid.setDisabledResult = false
+        let controller = AwakeController(power: MockPowerManager(), lid: lid, startServices: false)
+        controller.userToggleLidGuard(on: true)
+        XCTAssertTrue(controller.lidGuardEnabled)
+
+        controller.startManual()
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        XCTAssertEqual(lid.setDisabledCalls, 1)
+        XCTAssertFalse(controller.lidGuardEnabled)
+        XCTAssertEqual(controller.lidInstallStatus, .notInstalled)
+        XCTAssertEqual(controller.lidSetupError, "Passwordless lid setup needs to be run again.")
+    }
+
     func testRevokeUninstallsAndDisablesPreference() async throws {
         let lid = MockLidGuard(currentlyDisabled: true, status: .installed)
         lid.uninstallResult = .success(())
@@ -206,6 +263,7 @@ private final class MockLidGuard: LidGuarding, @unchecked Sendable {
     var statusAfterUninstall: LidInstallStatus?
     var installResult: Result<Void, LidActionError> = .success(())
     var uninstallResult: Result<Void, LidActionError> = .success(())
+    var setDisabledResult = true
     private(set) var setDisabledCalls = 0
     private(set) var installCalls = 0
     private(set) var uninstallCalls = 0
@@ -252,8 +310,10 @@ private final class MockLidGuard: LidGuarding, @unchecked Sendable {
         lock.lock()
         setDisabledCalls += 1
         lastSetValue = disabled
-        self.disabled = disabled
+        if setDisabledResult {
+            self.disabled = disabled
+        }
         lock.unlock()
-        return true
+        return setDisabledResult
     }
 }

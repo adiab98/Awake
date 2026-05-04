@@ -24,6 +24,27 @@ protocol LidGuarding: AnyObject, Sendable {
     func setDisabled(_ disabled: Bool, allowPrompt: Bool) -> Bool
 }
 
+#if APP_STORE
+/// Mac App Store builds cannot request root privileges or install resources in
+/// shared system locations. Keep the type available, but make lid-control a
+/// no-op so the App Store binary contains no sudo/pmset/sudoers workflow.
+final class LidGuard: LidGuarding, @unchecked Sendable {
+    func currentlyDisabled() -> Bool { false }
+    func installationStatus() -> LidInstallStatus { .notInstalled }
+
+    func install() -> Result<Void, LidActionError> {
+        .failure(.privilegedShellFailed(
+            code: 1,
+            message: "Lid-close sleep control is not available in the Mac App Store build."
+        ))
+    }
+
+    func uninstall() -> Result<Void, LidActionError> { .success(()) }
+
+    @discardableResult
+    func setDisabled(_ disabled: Bool, allowPrompt: Bool = false) -> Bool { false }
+}
+#else
 /// Manages `pmset -a disablesleep` (the lid-close sleep override) by installing a
 /// narrowly-scoped sudoers rule on first use. After install, the toggle runs
 /// `sudo -n /usr/bin/pmset -a disablesleep 0|1` with no password prompt.
@@ -56,18 +77,17 @@ final class LidGuard: LidGuarding, @unchecked Sendable {
     }
 
     /// Detects whether the current user can run the protected pmset commands
-    /// without a password prompt. Uses `/etc/sudoers.d/awake` existence as the
-    /// source of truth — the directory is world-readable on macOS (mode 755
-    /// root:wheel) so the regular user can stat it.
-    ///
-    /// Tried sniffing `sudo -n -l <cmd>` for a NOPASSWD: marker, but the
-    /// listing format varies across macOS versions (some print the rule's
-    /// argv only, no NOPASSWD: prefix), and a fresh sudo timestamp can also
-    /// produce exit 0 with no matching rule. File existence dodges both
-    /// problems: the file is owned root:wheel mode 440 and only Awake's
-    /// install/uninstall touch it.
+    /// without a password prompt. File existence is only the first gate: the
+    /// sudoers file can be stale, edited, or for another user, so we also inspect
+    /// sudo's non-interactive privilege listing for the exact NOPASSWD commands.
     func installationStatus() -> LidInstallStatus {
-        return FileManager.default.fileExists(atPath: Self.sudoersPath)
+        guard FileManager.default.fileExists(atPath: Self.sudoersPath) else {
+            return .notInstalled
+        }
+        guard let listing = runRead(Self.sudoPath, ["-n", "-l"]) else {
+            return .notInstalled
+        }
+        return Self.sudoListShowsPasswordlessPmsetCommands(listing)
             ? .installed
             : .notInstalled
     }
@@ -181,6 +201,28 @@ final class LidGuard: LidGuarding, @unchecked Sendable {
          .replacingOccurrences(of: "\"", with: "\\\"")
     }
 
+    static func sudoListShowsPasswordlessPmsetCommands(_ listing: String) -> Bool {
+        func hasRule(for value: String) -> Bool {
+            let expected = "\(pmsetPath) -a disablesleep \(value)"
+            return listing.split(separator: "\n").contains { rawLine in
+                let normalized = rawLine
+                    .split(whereSeparator: { $0 == " " || $0 == "\t" })
+                    .joined(separator: " ")
+                guard let marker = normalized.range(
+                    of: "NOPASSWD:",
+                    options: [.caseInsensitive]
+                ) else {
+                    return false
+                }
+                let command = normalized[marker.upperBound...]
+                    .trimmingCharacters(in: .whitespaces)
+                return command == expected
+            }
+        }
+
+        return hasRule(for: "0") && hasRule(for: "1")
+    }
+
     private func runPrivileged(shell: String, prompt: String) -> Result<Void, LidActionError> {
         let escapedShell = Self.appleScriptEscape(shell)
         let escapedPrompt = Self.appleScriptEscape(prompt)
@@ -227,3 +269,4 @@ final class LidGuard: LidGuarding, @unchecked Sendable {
         return String(data: data, encoding: .utf8)
     }
 }
+#endif

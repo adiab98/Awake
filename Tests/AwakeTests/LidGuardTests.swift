@@ -80,6 +80,38 @@ final class LidGuardTests: XCTestCase {
         }
     }
 
+    func testSudoListingAcceptsExactPasswordlessPmsetCommands() {
+        let listing = """
+        Matching Defaults entries for alice on Mac:
+            env_reset
+
+        User alice may run the following commands on Mac:
+            (ALL) ALL
+            (root : wheel) NOPASSWD: /usr/bin/pmset -a disablesleep 0
+            (root : wheel) NOPASSWD: /usr/bin/pmset -a disablesleep 1
+        """
+
+        XCTAssertTrue(LidGuard.sudoListShowsPasswordlessPmsetCommands(listing))
+    }
+
+    func testSudoListingRejectsPasswordProtectedBroadAccess() {
+        let listing = """
+        User alice may run the following commands on Mac:
+            (ALL) ALL
+        """
+
+        XCTAssertFalse(LidGuard.sudoListShowsPasswordlessPmsetCommands(listing))
+    }
+
+    func testSudoListingRejectsMissingPmsetCommand() {
+        let listing = """
+        User alice may run the following commands on Mac:
+            (root : wheel) NOPASSWD: /usr/bin/pmset -a disablesleep 0
+        """
+
+        XCTAssertFalse(LidGuard.sudoListShowsPasswordlessPmsetCommands(listing))
+    }
+
     /// Pipes the generated body through `visudo -c -f -` to confirm it parses.
     /// Skips on hosts where visudo isn't installed (CI runners without /usr/sbin).
     func testSudoersContentPassesVisudoCheck() throws {

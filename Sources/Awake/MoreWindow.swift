@@ -20,12 +20,13 @@ enum MoreWindow {
             rootView: MoreView().environmentObject(controller)
         )
         let w = NSWindow(contentViewController: host)
-        w.styleMask = [.titled, .closable, .fullSizeContentView]
+        w.styleMask = [.titled, .closable, .resizable, .fullSizeContentView]
         w.titlebarAppearsTransparent = true
         w.titleVisibility = .hidden
         w.isReleasedWhenClosed = false
         w.title = "Awake"
-        w.setContentSize(NSSize(width: 380, height: 420))
+        w.setContentSize(NSSize(width: 380, height: 520))
+        w.minSize = NSSize(width: 360, height: 360)
         w.center()
         closeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
@@ -50,6 +51,14 @@ private struct MoreView: View {
     @EnvironmentObject var controller: AwakeController
 
     var body: some View {
+        ScrollView {
+            content
+        }
+        .frame(minWidth: 360, idealWidth: 380, minHeight: 360)
+        .background(MoreMaterial())
+    }
+
+    private var content: some View {
         VStack(spacing: 0) {
 
             Image(systemName: "cup.and.saucer.fill")
@@ -61,6 +70,15 @@ private struct MoreView: View {
             Text("Awake")
                 .font(.system(size: 18, weight: .bold))
 
+            #if APP_STORE
+            Text("Keeps your Mac awake while AI agents finish their turn.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 28)
+                .padding(.top, 6)
+            #else
             Text("Keeps your Mac awake while AI agents finish their turn, even with the lid closed.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
@@ -68,6 +86,7 @@ private struct MoreView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 28)
                 .padding(.top, 6)
+            #endif
 
             Divider()
                 .padding(.horizontal, 24)
@@ -138,8 +157,9 @@ private struct MoreView: View {
                             .controlSize(.small)
                             .accessibilityLabel(tool.displayName)
                         }
-                        if tool.experimental && controller.enabledTools.contains(tool) {
-                            Text("Cursor's UI keeps API connections open even when idle. Detection is best-effort; turn off if Awake stays caffeinated when you're not actively prompting.")
+                        if let note = tool.experimentalNote,
+                           controller.enabledTools.contains(tool) {
+                            Text(note)
                                 .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -150,6 +170,29 @@ private struct MoreView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 28)
 
+            #if APP_STORE
+            Divider()
+                .padding(.horizontal, 24)
+                .padding(.vertical, 18)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Closed-lid support")
+                    .font(.system(size: 13, weight: .semibold))
+
+                Text("The Mac App Store build uses public macOS power assertions. Closed-lid support requires a separate helper that is not included in this app.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("Learn More") {
+                    controller.openClosedLidHelp()
+                }
+                .controlSize(.small)
+                .accessibilityHint("Opens details about Awake's separate closed-lid helper")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 28)
+            #else
             Divider()
                 .padding(.horizontal, 24)
                 .padding(.vertical, 18)
@@ -184,28 +227,7 @@ private struct MoreView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                HStack(spacing: 8) {
-                    if controller.lidPasswordlessReady {
-                        Button("Revoke Passwordless Access") {
-                            controller.userRevokePasswordlessLid()
-                        }
-                        .controlSize(.small)
-                        .disabled(controller.lidActionInFlight)
-                    } else {
-                        Button("Set Up Passwordless Toggle") {
-                            controller.userInstallPasswordlessLid()
-                        }
-                        .controlSize(.small)
-                        .disabled(controller.lidActionInFlight)
-                    }
-                    if controller.disablesleepActive {
-                        Button("Restore Lid Sleep") {
-                            controller.userRestoreLidSleep()
-                        }
-                        .controlSize(.small)
-                        .disabled(controller.lidActionInFlight)
-                    }
-                }
+                lidActionButtons
 
                 if let error = controller.lidSetupError {
                     Text(error)
@@ -216,17 +238,61 @@ private struct MoreView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 28)
-
-            Spacer()
+            #endif
 
             Text("Version 0.1")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
+                .padding(.top, 24)
                 .padding(.bottom, 18)
         }
-        .frame(width: 380)
-        .background(MoreMaterial())
+        .frame(maxWidth: .infinity)
     }
+
+    #if !APP_STORE
+    private var lidActionButtons: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                primaryLidActionButton
+                restoreLidSleepButton
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                primaryLidActionButton
+                restoreLidSleepButton
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var primaryLidActionButton: some View {
+        if controller.lidPasswordlessReady {
+            Button("Revoke Passwordless Access") {
+                controller.userRevokePasswordlessLid()
+            }
+            .controlSize(.small)
+            .disabled(controller.lidActionInFlight)
+        } else {
+            Button("Set Up Passwordless Toggle") {
+                controller.userInstallPasswordlessLid()
+            }
+            .controlSize(.small)
+            .disabled(controller.lidActionInFlight)
+        }
+    }
+
+    @ViewBuilder
+    private var restoreLidSleepButton: some View {
+        if controller.disablesleepActive {
+            Button("Restore Lid Sleep") {
+                controller.userRestoreLidSleep()
+            }
+            .controlSize(.small)
+            .disabled(controller.lidActionInFlight)
+        }
+    }
+    #endif
 }
 
 private struct MoreMaterial: NSViewRepresentable {

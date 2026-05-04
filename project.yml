@@ -1,0 +1,63 @@
+name: Awake
+options:
+  bundleIdPrefix: com.diabdiab
+  deploymentTarget:
+    macOS: "14.0"
+configs:
+  Debug: debug
+  Release: release
+settings:
+  base:
+    DEVELOPMENT_TEAM: AR6D29J5FK
+    CODE_SIGN_STYLE: Automatic
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+targets:
+  Awake:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/Awake
+      - path: icon/AppIcon.icns
+        buildPhase: resources
+    entitlements:
+      path: Awake-AppStore.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.temporary-exception.files.home-relative-path.read-only:
+          - /.claude/projects/
+          - /Library/Application Support/Claude/claude-code-sessions/
+          - /Library/Application Support/Claude/local-agent-mode-sessions/
+          - /.codex/sessions/
+          - /.local/share/opencode/sessions/
+          - /.config/opencode/sessions/
+    info:
+      path: AppStoreInfo.plist
+      properties:
+        CFBundleDisplayName: Awake
+        CFBundleIconFile: AppIcon
+        CFBundleName: Awake
+        CFBundlePackageType: APPL
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "2"
+        ITSAppUsesNonExemptEncryption: false
+        LSApplicationCategoryType: public.app-category.utilities
+        LSMinimumSystemVersion: "14.0"
+        LSUIElement: true
+        NSHumanReadableCopyright: Copyright 2026 Awake.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.diabdiab.awake
+        PRODUCT_NAME: Awake
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) APP_STORE"
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: Awake-AppStore.entitlements
+schemes:
+  Awake:
+    build:
+      targets:
+        Awake: all
+    run:
+      config: Debug
+    archive:
+      config: Release

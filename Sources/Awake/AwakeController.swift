@@ -104,6 +104,8 @@ final class AwakeController: ObservableObject {
         var next = enabledTools
         if enabled { next.insert(tool) } else { next.remove(tool) }
         enabledTools = next
+        pruneDisabledToolState()
+        sync()
     }
     @AppStorage("preventDisplaySleep") var preventDisplaySleep: Bool = false { didSet { sync() } }
 
@@ -171,10 +173,10 @@ final class AwakeController: ObservableObject {
     ) {
         self.power = power
         self.lid = lid
-        // Default: every tool enabled. Persisted choice (made in onboarding
-        // or More) overrides; new tools added in future builds will appear
-        // disabled for existing users until they opt in.
-        self.enabledTools = AgentToolStore.load() ?? Set(AgentTool.allCases)
+        // Default: stable CLI/file-based tools enabled. Persisted choices
+        // override this; new tools added in future builds stay disabled for
+        // existing users until they opt in.
+        self.enabledTools = AgentToolStore.load() ?? AgentTool.defaultEnabled
         // Seed install status synchronously. The probe is two `sudo -n -l` calls
         // (or a noop in the mock) — fast enough that paying the cost up-front beats
         // a brief UI flash showing "not installed" on real launches.
@@ -201,21 +203,25 @@ final class AwakeController: ObservableObject {
 
     /// Active agents (filtered by CPU / child-process activity probe).
     var activeAgents: [DetectedAgent] {
-        detectedAgents.filter { $0.isActive }
+        detectedAgents.filter { $0.isActive && enabledTools.contains($0.kind.tool) }
     }
 
     /// Agent sources whose transcript was written recently — used for sleep decisions
     /// (long window, conservative).
     var logActiveSources: [LogActivityWatcher.Source] {
         let cutoff = Date().addingTimeInterval(-Self.logActivityHoldWindow)
-        return lastLogActivity.compactMap { src, t in t > cutoff ? src : nil }
+        return lastLogActivity.compactMap { src, t in
+            enabledTools.contains(src.tool) && t > cutoff ? src : nil
+        }
     }
 
     /// Agent sources whose transcript was written in the very recent past — used for
     /// the menu's "in turn" badge so the UI clears within seconds of a turn ending.
     var inTurnLogSources: [LogActivityWatcher.Source] {
         let cutoff = Date().addingTimeInterval(-Self.inTurnDisplayWindow)
-        return lastLogActivity.compactMap { src, t in t > cutoff ? src : nil }
+        return lastLogActivity.compactMap { src, t in
+            enabledTools.contains(src.tool) && t > cutoff ? src : nil
+        }
     }
 
     /// Raw signal: at this exact instant, do we have CPU or recent transcript activity?
@@ -246,7 +252,7 @@ final class AwakeController: ObservableObject {
             brands.insert(a.kind.tool.brandLabel)
         }
         for s in inTurnLogSources {
-            brands.insert(s.displayName)
+            brands.insert(s.tool.brandLabel)
         }
         return brands.sorted()
     }
@@ -255,7 +261,7 @@ final class AwakeController: ObservableObject {
     /// currently in-turn. Lets the UI show "Claude session open" for honesty.
     var allSessionBrands: [String] {
         var brands = Set<String>()
-        for a in detectedAgents {
+        for a in detectedAgents where enabledTools.contains(a.kind.tool) {
             brands.insert(a.kind.tool.brandLabel)
         }
         return brands.sorted()
@@ -264,7 +270,7 @@ final class AwakeController: ObservableObject {
     /// Per-brand status pairs for compact display: ("Claude", "in turn"), ("Codex", "idle").
     var brandStatuses: [(brand: String, state: String, isActive: Bool)] {
         let active = Set(detectedBrands)
-        let all = allSessionBrands
+        let all = Set(allSessionBrands).union(active).sorted()
         return all.map { brand in
             let isActive = active.contains(brand)
             return (brand, isActive ? "in turn" : "idle", isActive)
@@ -307,7 +313,15 @@ final class AwakeController: ObservableObject {
 
     var lidPasswordlessReady: Bool { lidInstallStatus == .installed }
 
+    static let closedLidHelpURL = URL(
+        string: "https://github.com/adiab98/Awake/blob/main/docs/closed-lid.md"
+    )!
+
     // MARK: - Actions
+
+    func openClosedLidHelp() {
+        NSWorkspace.shared.open(Self.closedLidHelpURL)
+    }
 
     private func startBackgroundServices() {
         agents.enabledTools = enabledTools
@@ -320,10 +334,7 @@ final class AwakeController: ObservableObject {
         logWatcher.onActivity = { [weak self] source in
             Task { @MainActor in
                 guard let self else { return }
-                let now = Date()
-                self.lastLogActivity[source] = now
-                self.lastActivityAt = now
-                self.sync()
+                self.handleLogActivity(source)
             }
         }
         logWatcher.start()
@@ -358,28 +369,39 @@ final class AwakeController: ObservableObject {
             }
         }
 
-        // First-launch onboarding: offer lid-setup, then the AI tool picker.
-        // Each is gated by its own UserDefaults flag so we never re-prompt.
+        // First-launch onboarding. Each prompt is gated by its own UserDefaults
+        // flag so we never re-prompt.
+        #if APP_STORE
+        if !hasOfferedToolPicker {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                Task { @MainActor in self?.showFirstRunSetupPrompt() }
+            }
+        }
+        #else
         if !hasOfferedLidSetup || !hasOfferedToolPicker {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                 Task { @MainActor in self?.showFirstRunSetupPrompt() }
             }
         }
+        #endif
     }
 
     private func showFirstRunSetupPrompt() {
+        #if !APP_STORE
         if !hasOfferedLidSetup {
             hasOfferedLidSetup = true
             if lidInstallStatus != .installed {
                 runLidSetupAlert()
             }
         }
+        #endif
         if !hasOfferedToolPicker {
             hasOfferedToolPicker = true
             runToolPickerAlert()
         }
     }
 
+    #if !APP_STORE
     private func runLidSetupAlert() {
         let alert = NSAlert()
         alert.messageText = "Set up passwordless lid-close sleep?"
@@ -398,6 +420,7 @@ final class AwakeController: ObservableObject {
             userInstallPasswordlessLid()
         }
     }
+    #endif
 
     private func runToolPickerAlert() {
         let alert = NSAlert()
@@ -476,6 +499,9 @@ final class AwakeController: ObservableObject {
     }
 
     func requestQuit() {
+        #if APP_STORE
+        NSApp.terminate(nil)
+        #else
         refreshLaunchAtLogin()
         let lidRef = lid
         DispatchQueue.global(qos: .utility).async {
@@ -496,6 +522,7 @@ final class AwakeController: ObservableObject {
                 NSApp.terminate(nil)
             }
         }
+        #endif
     }
 
     func clearStatusNotice() {
@@ -542,6 +569,24 @@ final class AwakeController: ObservableObject {
         sync()
     }
 
+    func handleLogActivity(_ source: LogActivityWatcher.Source, at date: Date = Date()) {
+        guard enabledTools.contains(source.tool) else { return }
+        lastLogActivity[source] = date
+        lastActivityAt = date
+        sync()
+    }
+
+    private func pruneDisabledToolState() {
+        detectedAgents.removeAll { !enabledTools.contains($0.kind.tool) }
+        lastLogActivity = lastLogActivity.filter { source, _ in
+            enabledTools.contains(source.tool)
+        }
+        if !anyAgentRightNow {
+            lastActivityAt = nil
+        }
+    }
+
+    #if !APP_STORE
     // MARK: - Lid guard install / toggle
 
     /// User flipped the "Stay awake with lid closed" toggle. If passwordless setup
@@ -617,10 +662,13 @@ final class AwakeController: ObservableObject {
                 self.lidInstallStatus = status
                 switch result {
                 case .success:
-                    // installationStatus() is now file-existence based, so a
-                    // successful install always flips status to .installed.
-                    if thenEnable { self.lidGuardEnabled = true }
-                    self.setStatusNotice("Passwordless lid sleep ready.")
+                    if status == .installed {
+                        if thenEnable { self.lidGuardEnabled = true }
+                        self.setStatusNotice("Passwordless lid sleep ready.")
+                    } else {
+                        self.lidGuardEnabled = false
+                        self.lidSetupError = "Passwordless lid setup could not be verified."
+                    }
                 case .failure(.userCancelled):
                     // The Toggle binding visually flipped ON when the user
                     // tapped it. The install was cancelled so the underlying
@@ -650,6 +698,7 @@ final class AwakeController: ObservableObject {
             return "Privileged step failed: \(m)"
         }
     }
+    #endif
 
     // MARK: - Sync power state
 
@@ -657,15 +706,19 @@ final class AwakeController: ObservableObject {
         if isCaffeinated {
             let ok = power.assert(preventDisplaySleep: preventDisplaySleep)
             powerAssertionError = ok ? nil : power.lastError
+            #if !APP_STORE
             if lidGuardEnabled {
                 maybeEngageLidGuard()
             } else {
                 maybeAutoReleaseLidGuard()
             }
+            #endif
         } else {
             let ok = power.release()
             powerAssertionError = ok ? nil : power.lastError
+            #if !APP_STORE
             maybeAutoReleaseLidGuard()
+            #endif
         }
     }
 
@@ -675,7 +728,9 @@ final class AwakeController: ObservableObject {
 
     private func refreshExternalState() {
         refreshLaunchAtLogin()
+        #if !APP_STORE
         refreshLidState()
+        #endif
     }
 
     private func refreshLidState() {
@@ -690,6 +745,10 @@ final class AwakeController: ObservableObject {
                 }
                 if self.lidInstallStatus != status {
                     self.lidInstallStatus = status
+                }
+                if status != .installed && self.lidGuardEnabled {
+                    self.lidGuardEnabled = false
+                    self.lidSetupError = "Passwordless lid setup needs to be run again."
                 }
             }
         }
@@ -726,6 +785,7 @@ final class AwakeController: ObservableObject {
         statusNoticeTimer = timer
     }
 
+    #if !APP_STORE
     /// Auto-release the pmset override when nothing is keeping the Mac awake AND we
     /// were the ones who engaged it. Strictly silent — bails if sudoers isn't
     /// installed. The user can manually restore via the Restore Lid Sleep button.
@@ -746,6 +806,9 @@ final class AwakeController: ObservableObject {
                     self.weEngagedLidGuard = false
                 } else {
                     self.disablesleepActive = current
+                    self.lidInstallStatus = .notInstalled
+                    self.lidGuardEnabled = false
+                    self.lidSetupError = "Passwordless lid setup needs to be run again."
                     self.setStatusNotice("Restore lid sleep from More.")
                 }
             }
@@ -776,6 +839,13 @@ final class AwakeController: ObservableObject {
                 if ok {
                     self.disablesleepActive = true
                     self.weEngagedLidGuard = true
+                } else {
+                    self.disablesleepActive = lidRef.currentlyDisabled()
+                    self.weEngagedLidGuard = false
+                    self.lidInstallStatus = .notInstalled
+                    self.lidGuardEnabled = false
+                    self.lidSetupError = "Passwordless lid setup needs to be run again."
+                    self.setStatusNotice("Set up passwordless lid sleep again.")
                 }
             }
         }
@@ -818,4 +888,5 @@ final class AwakeController: ObservableObject {
             }
         }
     }
+    #endif
 }

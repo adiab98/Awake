@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>destination</key>
+	<string>export</string>
+	<key>installerSigningCertificate</key>
+	<string>022A2D2D7A3A9ADDAF5498C897A961AF711996C5</string>
+	<key>method</key>
+	<string>app-store-connect</string>
+	<key>provisioningProfiles</key>
+	<dict>
+		<key>com.diabdiab.awake</key>
+		<string>Awake Mac App Store 2026</string>
+	</dict>
+	<key>signingCertificate</key>
+	<string>848126E150B17A032ABAC5705AD98F056DDAE50C</string>
+	<key>signingStyle</key>
+	<string>manual</string>
+	<key>stripSwiftSymbols</key>
+	<true/>
+	<key>teamID</key>
+	<string>AR6D29J5FK</string>
+	<key>uploadSymbols</key>
+	<true/>
+</dict>
+</plist>

@@ -11,8 +11,10 @@ struct DetectedAgent: Identifiable, Hashable {
 
         var tool: AgentTool {
             switch self {
-            case .claudeApp, .claudeCLI: return .claude
-            case .codexApp, .codexCLI: return .codex
+            case .claudeApp: return .claudeDesktop
+            case .claudeCLI: return .claude
+            case .codexApp: return .codexDesktop
+            case .codexCLI: return .codex
             case .cursorApp: return .cursor
             case .opencodeCLI: return .opencode
             }
@@ -70,7 +72,10 @@ final class AgentMonitor {
     }
     private static let apiHostnames = [
         "api.anthropic.com",
+        "claude.ai",
         "api.openai.com",
+        "chatgpt.com",
+        "chat.openai.com",
         "api.cursor.sh",
         "api.cursor.com",
     ]
@@ -79,22 +84,22 @@ final class AgentMonitor {
     /// Per-agent: total cumulative CPU seconds across the process tree at the previous poll.
     private var lastTreeCpuSample: [Int32: (taken: Date, totalCpu: Double)] = [:]
 
-    private let claudeRegex = try! NSRegularExpression(
+    private static let claudeRegex = try! NSRegularExpression(
         pattern: #"(^|[\s/])claude(?:\.[a-z]+)?(?:\s|$)"#,
         options: .caseInsensitive
     )
-    private let codexRegex = try! NSRegularExpression(
+    private static let codexRegex = try! NSRegularExpression(
         pattern: #"(^|[\s/])codex(?:\.[a-z]+)?(?:\s|$)"#,
         options: .caseInsensitive
     )
     /// Cursor's helper Electron processes. We match the user-facing app
     /// binary path; "Cursor Helper" subprocesses share the same parent and
     /// get rolled into the descendant tree for CPU / network checks.
-    private let cursorRegex = try! NSRegularExpression(
+    private static let cursorRegex = try! NSRegularExpression(
         pattern: #"/Cursor\.app/Contents/MacOS/Cursor(?:\s|$)"#,
         options: []
     )
-    private let opencodeRegex = try! NSRegularExpression(
+    private static let opencodeRegex = try! NSRegularExpression(
         pattern: #"(^|[\s/])opencode(?:[-_][a-z]+)?(?:\s|$)"#,
         options: .caseInsensitive
     )
@@ -156,6 +161,7 @@ final class AgentMonitor {
         var procs: [Int32: ProcInfo] = [:]
         var childrenOf: [Int32: [Int32]] = [:]
         var candidatePids: [(pid: Int32, label: String, kind: DetectedAgent.Kind)] = []
+        var codexDesktopServerPids: [Int32] = []
 
         for line in psOut.split(separator: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -180,38 +186,14 @@ final class AgentMonitor {
             let cmdLower = cmd.lowercased()
             if cmdLower.contains("/awake") || cmdLower.contains("awake.app/contents") { continue }
 
-            // Cursor matches by full app path so cursorRegex still hits — but
-            // we need to skip Claude/Codex desktop apps before regex matching.
-            let isClaudeApp = cmdLower.contains("claude.app/contents")
-            let isCodexApp = cmdLower.contains("codex.app/contents")
-
-            let range = NSRange(cmd.startIndex..., in: cmd)
-            if !isClaudeApp && !isCodexApp,
-               enabled.contains(.claude),
-               claudeRegex.firstMatch(in: cmd, range: range) != nil {
-                candidatePids.append((pid, "claude (cli)", .claudeCLI))
-            } else if !isClaudeApp && !isCodexApp,
-                      enabled.contains(.codex),
-                      codexRegex.firstMatch(in: cmd, range: range) != nil {
-                candidatePids.append((pid, "codex (cli)", .codexCLI))
-            } else if !isClaudeApp && !isCodexApp,
-                      enabled.contains(.opencode),
-                      opencodeRegex.firstMatch(in: cmd, range: range) != nil {
-                candidatePids.append((pid, "opencode (cli)", .opencodeCLI))
-            } else if enabled.contains(.cursor),
-                      cursorRegex.firstMatch(in: cmd, range: range) != nil {
-                // Only the main Cursor binary — helpers get included via the
-                // descendant tree of the parent.
-                candidatePids.append((pid, "cursor", .cursorApp))
+            if enabled.contains(.codexDesktop),
+               Self.isCodexDesktopAppServerCommand(cmd) {
+                codexDesktopServerPids.append(pid)
+            }
+            if let candidate = Self.candidate(for: cmd, enabledTools: enabled) {
+                candidatePids.append((pid, candidate.label, candidate.kind))
             }
         }
-
-        // NOTE: We deliberately skip Claude.app / Codex.app desktop processes.
-        // Their CPU baselines are unreliable (UI rendering, background sync, animation
-        // routinely spike them above any sane threshold) and we have no way from the
-        // outside to distinguish "running an agent task" from "idle in the dock".
-        // Only CLI agents (which write to ~/.claude/projects/ and have stable near-zero
-        // idle CPU) are detected.
 
         // Dedupe by pid
         var seen = Set<Int32>()
@@ -253,6 +235,44 @@ final class AgentMonitor {
             ))
         }
 
+        for pid in codexDesktopServerPids {
+            let tree = descendants(of: pid, in: childrenOf)
+            let workerTree = tree.filter { workerPid in
+                guard workerPid != pid else { return false }
+                return Self.isCodexDesktopAgentWorkerCommand(procs[workerPid]?.command ?? "")
+            }
+            guard !workerTree.isEmpty else { continue }
+
+            let workerCpu = workerTree.reduce(0.0) { sum, pid in sum + (procs[pid]?.cpuSec ?? 0) }
+            let workerCurrentCpu = workerTree.reduce(0.0) { sum, pid in sum + (procs[pid]?.cpuPercent ?? 0) }
+            newSamples[pid] = (now, workerCpu)
+
+            var recentWorkerCpu: Double? = nil
+            if let prev = lastTreeCpuSample[pid] {
+                let dt = now.timeIntervalSince(prev.taken)
+                if dt > 0 {
+                    let dCpu = workerCpu - prev.totalCpu
+                    recentWorkerCpu = max(0, (dCpu / dt) * 100.0)
+                }
+            }
+
+            let cpuActive = (recentWorkerCpu ?? workerCurrentCpu) >= cpuActivityThreshold
+            let networkTree = workerTree.filter { !isMcpServer(procs[$0]?.command ?? "") }
+            let networkActive = cpuActive ? false : hasNetworkActivity(treePids: networkTree)
+            let active = cpuActive || networkActive
+            guard active else { continue }
+
+            results.append(DetectedAgent(
+                id: pid,
+                label: "codex desktop agent",
+                kind: .codexApp,
+                parentCpuSeconds: procs[pid]?.cpuSec ?? 0,
+                treeCpuPercent: recentWorkerCpu,
+                isActive: true,
+                hasNetworkActivity: networkActive
+            ))
+        }
+
         lastTreeCpuSample = newSamples
 
         let summary = results.isEmpty
@@ -265,6 +285,66 @@ final class AgentMonitor {
         monitorLog.debug("scan: \(results.count, privacy: .public) — \(summary, privacy: .public)")
 
         return results
+    }
+
+    static func candidate(
+        for command: String,
+        enabledTools enabled: Set<AgentTool>
+    ) -> (label: String, kind: DetectedAgent.Kind)? {
+        let cmdLower = command.lowercased()
+        if cmdLower.contains("/awake") || cmdLower.contains("awake.app/contents") {
+            return nil
+        }
+
+        if Self.isClaudeDesktopAgentCommand(command) {
+            return enabled.contains(.claudeDesktop)
+                ? ("claude desktop agent", .claudeApp)
+                : nil
+        }
+        if cmdLower.contains(".app/contents/macos/claude")
+            || cmdLower.contains(".app/contents/macos/codex")
+            || cmdLower.contains(".app/contents/frameworks/") {
+            return nil
+        }
+
+        let range = NSRange(command.startIndex..., in: command)
+        if enabled.contains(.claude),
+           claudeRegex.firstMatch(in: command, range: range) != nil {
+            return ("claude code", .claudeCLI)
+        }
+        if enabled.contains(.codex),
+           codexRegex.firstMatch(in: command, range: range) != nil {
+            return ("codex cli", .codexCLI)
+        }
+        if enabled.contains(.opencode),
+           opencodeRegex.firstMatch(in: command, range: range) != nil {
+            return ("opencode cli", .opencodeCLI)
+        }
+        if enabled.contains(.cursor),
+           cursorRegex.firstMatch(in: command, range: range) != nil {
+            return ("cursor", .cursorApp)
+        }
+        return nil
+    }
+
+    static func isClaudeDesktopAgentCommand(_ command: String) -> Bool {
+        let lc = command.lowercased()
+        return lc.contains("/library/application support/claude/claude-code/")
+            || lc.contains("/library/application support/claude/claude-code-vm/")
+    }
+
+    static func isCodexDesktopAppServerCommand(_ command: String) -> Bool {
+        let lc = command.lowercased()
+        return lc.contains("/codex.app/contents/resources/codex app-server")
+    }
+
+    static func isCodexDesktopAgentWorkerCommand(_ command: String) -> Bool {
+        let lc = command.lowercased()
+        if lc.contains("/codex.app/contents/frameworks/") { return false }
+        if lc.contains("/codex.app/contents/macos/codex") { return false }
+        if isCodexDesktopAppServerCommand(command) { return false }
+        if lc.contains("chrome_crashpad_handler") { return false }
+        return true
     }
 
     /// Heuristic: is this command line an MCP server? They keep persistent connections

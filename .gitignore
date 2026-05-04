@@ -6,3 +6,10 @@ build/
 Package.resolved
 .env
 .claude/
+
+# Local signing material. Keep certificates, private keys, and provisioning
+# profiles out of accidental `git add .` sweeps.
+signing/
+*.p12
+*.key
+*.provisionprofile

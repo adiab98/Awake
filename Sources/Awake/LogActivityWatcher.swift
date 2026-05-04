@@ -4,17 +4,19 @@ import os.log
 
 private let watcherLog = Logger(subsystem: "com.diabdiab.awake", category: "log-watcher")
 
-/// Watches the log/transcript directories that Claude Code and Codex write to in real time.
+/// Watches the log/transcript directories that agents write to in real time.
 /// Catches the gap between an agent process spawning and our process scan picking it up,
 /// and also covers periods where the agent is awaiting an API response (no local CPU,
 /// no child processes, but the streamed transcript is being appended to).
 final class LogActivityWatcher {
     enum Source: String, Hashable {
-        case claude, codex, opencode
+        case claude, claudeDesktop, codex, codexDesktop, opencode
         var displayName: String {
             switch self {
-            case .claude: return "Claude"
-            case .codex: return "Codex"
+            case .claude: return "Claude Code"
+            case .claudeDesktop: return "Claude Desktop"
+            case .codex: return "Codex CLI"
+            case .codexDesktop: return "Codex Desktop"
             case .opencode: return "OpenCode"
             }
         }
@@ -22,7 +24,9 @@ final class LogActivityWatcher {
         var tool: AgentTool {
             switch self {
             case .claude: return .claude
+            case .claudeDesktop: return .claudeDesktop
             case .codex: return .codex
+            case .codexDesktop: return .codexDesktop
             case .opencode: return .opencode
             }
         }
@@ -42,24 +46,37 @@ final class LogActivityWatcher {
     }
 
     private var stream: FSEventStreamRef?
-    private var roots: [(path: String, source: Source)] = []
-    private let rootSpecs: [(path: String, source: Source)]
+    private struct Root {
+        let path: String
+        let sources: [Source]
+    }
+
+    private var roots: [Root] = []
+    private let rootSpecs: [Root]
     private let queue = DispatchQueue(label: "awake.fsevents")
     private let rootsLock = NSLock()
     private var retryTimer: Timer?
 
     init() {
         // Only watch the *session transcript* directories — these are written when an
-        // agent is actively in a turn. Avoid sibling dirs like ~/.codex/log, which
-        // contain background sync/diagnostic logs that would fire false positives.
+        // agent is actively in a turn. Avoid sibling dirs like ~/.codex/log, browser
+        // storage, and app cache folders that would fire false positives.
         // Watch both common OpenCode locations; whichever exists is picked up by
         // refreshRoots (and the retry timer catches creation later).
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         rootSpecs = [
-            ("\(home)/.claude/projects", .claude),
-            ("\(home)/.codex/sessions", .codex),
-            ("\(home)/.local/share/opencode/sessions", .opencode),
-            ("\(home)/.config/opencode/sessions", .opencode),
+            Root(path: "\(home)/.claude/projects", sources: [.claude]),
+            Root(
+                path: "\(home)/Library/Application Support/Claude/claude-code-sessions",
+                sources: [.claudeDesktop]
+            ),
+            Root(
+                path: "\(home)/Library/Application Support/Claude/local-agent-mode-sessions",
+                sources: [.claudeDesktop]
+            ),
+            Root(path: "\(home)/.codex/sessions", sources: [.codex, .codexDesktop]),
+            Root(path: "\(home)/.local/share/opencode/sessions", sources: [.opencode]),
+            Root(path: "\(home)/.config/opencode/sessions", sources: [.opencode]),
         ]
         refreshRoots()
     }
@@ -81,7 +98,7 @@ final class LogActivityWatcher {
             info: Unmanaged.passUnretained(self).toOpaque(),
             retain: nil, release: nil, copyDescription: nil
         )
-        let paths = currentRoots.map { $0.path } as CFArray
+        let paths = currentRoots.map(\.path) as CFArray
         // UseCFTypes makes the callback's `eventPaths` a CFArray<CFString> instead of char**.
         let flags = FSEventStreamCreateFlags(
             kFSEventStreamCreateFlagUseCFTypes
@@ -172,14 +189,17 @@ final class LogActivityWatcher {
     private func handleEvent(forPath p: String) {
         let enabled = enabledTools
         for root in rootsSnapshot() where p.hasPrefix(root.path) {
-            guard enabled.contains(root.source.tool) else { return }
-            watcherLog.debug("fsevent source=\(root.source.rawValue, privacy: .public) path=\(p, privacy: .public)")
-            onActivity?(root.source)
+            let sources = root.sources.filter { enabled.contains($0.tool) }
+            guard !sources.isEmpty else { return }
+            for source in sources {
+                watcherLog.debug("fsevent source=\(source.rawValue, privacy: .public) path=\(p, privacy: .public)")
+                onActivity?(source)
+            }
             return
         }
     }
 
-    private func rootsSnapshot() -> [(path: String, source: Source)] {
+    private func rootsSnapshot() -> [Root] {
         rootsLock.lock()
         let snapshot = roots
         rootsLock.unlock()

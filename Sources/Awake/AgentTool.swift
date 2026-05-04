@@ -5,16 +5,24 @@ import Foundation
 /// awake for during onboarding (and edits the choice from More).
 enum AgentTool: String, CaseIterable, Codable, Sendable, Identifiable {
     case claude
+    case claudeDesktop
     case codex
+    case codexDesktop
     case cursor
     case opencode
 
     var id: String { rawValue }
 
+    static var defaultEnabled: Set<AgentTool> {
+        [.claude, .codex, .cursor, .opencode]
+    }
+
     var displayName: String {
         switch self {
         case .claude: return "Claude Code"
-        case .codex: return "Codex"
+        case .claudeDesktop: return "Claude Desktop"
+        case .codex: return "Codex CLI"
+        case .codexDesktop: return "Codex Desktop"
         case .cursor: return "Cursor"
         case .opencode: return "OpenCode"
         }
@@ -23,8 +31,10 @@ enum AgentTool: String, CaseIterable, Codable, Sendable, Identifiable {
     /// Short label used in compact menu rows.
     var brandLabel: String {
         switch self {
-        case .claude: return "Claude"
-        case .codex: return "Codex"
+        case .claude: return "Claude Code"
+        case .claudeDesktop: return "Claude Desktop"
+        case .codex: return "Codex CLI"
+        case .codexDesktop: return "Codex Desktop"
         case .cursor: return "Cursor"
         case .opencode: return "OpenCode"
         }
@@ -35,8 +45,19 @@ enum AgentTool: String, CaseIterable, Codable, Sendable, Identifiable {
     /// if Awake misbehaves.
     var experimental: Bool {
         switch self {
-        case .cursor: return true
+        case .claudeDesktop, .codexDesktop, .cursor: return true
         case .claude, .codex, .opencode: return false
+        }
+    }
+
+    var experimentalNote: String? {
+        switch self {
+        case .claudeDesktop, .codexDesktop:
+            return "Desktop detection watches agent session activity inside the app, not the app merely being open. It is best-effort; turn off if Awake stays caffeinated while the app is idle."
+        case .cursor:
+            return "Cursor's UI can keep API connections open even when idle. Detection is best-effort; turn off if Awake stays caffeinated when you're not actively prompting."
+        case .claude, .codex, .opencode:
+            return nil
         }
     }
 }

@@ -1,8 +1,8 @@
 # Awake
 
 A tiny macOS menu-bar app that keeps your Mac awake while AI coding agents
-finish their turn — Claude Code, Codex, Cursor, OpenCode. Optionally keeps it
-running with the lid closed.
+finish their turn — Claude Code, Claude Desktop, Codex CLI, Codex Desktop,
+Cursor, and OpenCode. Optionally keeps it running with the lid closed.
 
 <p align="center">
   <img src="docs/screenshot.png" alt="Awake menu bar popover" width="420">
@@ -25,9 +25,10 @@ It lives in the menu bar; there is no Dock icon.
 
 ## Features
 
-- **Wait for AI agent turn** — keeps the Mac awake while Claude Code, Codex,
-  Cursor, or OpenCode is in-turn (CPU active, transcript writing, or open API
-  connection) and for a short sticky window after.
+- **Wait for AI agent turn** — keeps the Mac awake while Claude Code, Claude
+  Desktop, Codex CLI, Codex Desktop, Cursor, or OpenCode is in-turn (CPU active,
+  transcript writing, or open API connection) and for a short sticky window
+  after.
 - **Manual caffeinate** with optional timer, 1 minute to 12 hours, or custom.
 - **Keep display awake** — also blocks display sleep, not just system sleep.
 - **Stay awake with lid closed** — toggles `pmset -a disablesleep`. See below.
@@ -61,8 +62,9 @@ or manually:
 sudo rm /etc/sudoers.d/awake
 ```
 
-If you skip the setup, the lid toggle still works — every change just pops a
-password prompt. You can do the one-time setup later from More.
+If you skip or cancel the setup, Awake leaves closed-lid support off instead of
+repeatedly asking for admin authorization. You can run the one-time setup later
+from the lid toggle or from More.
 
 ## Uninstall
 
