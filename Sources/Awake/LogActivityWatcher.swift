@@ -109,7 +109,7 @@ final class LogActivityWatcher {
 
         let s = FSEventStreamCreate(
             kCFAllocatorDefault,
-            { (_, info, count, eventPaths, _, _) in
+            { (_, info, count, eventPaths, eventFlags, _) in
                 guard let info, count > 0 else { return }
                 let watcher = Unmanaged<LogActivityWatcher>
                     .fromOpaque(info).takeUnretainedValue()
@@ -118,9 +118,9 @@ final class LogActivityWatcher {
                     .fromOpaque(eventPaths)
                     .takeUnretainedValue()
                 let nsArray = cfArray as NSArray
-                for raw in nsArray {
+                for (index, raw) in nsArray.enumerated() {
                     if let p = raw as? String {
-                        watcher.handleEvent(forPath: p)
+                        watcher.handleEvent(forPath: p, flags: eventFlags[index])
                     }
                 }
             },
@@ -187,7 +187,8 @@ final class LogActivityWatcher {
         retryTimer = t
     }
 
-    private func handleEvent(forPath p: String) {
+    private func handleEvent(forPath p: String, flags: FSEventStreamEventFlags) {
+        guard Self.isTranscriptActivityPath(p, flags: flags) else { return }
         let enabled = enabledTools
         for root in rootsSnapshot() where p.hasPrefix(root.path) {
             let sources = sources(for: root, enabled: enabled)
@@ -198,6 +199,14 @@ final class LogActivityWatcher {
             }
             return
         }
+    }
+
+    static func isTranscriptActivityPath(_ path: String, flags: FSEventStreamEventFlags = 0) -> Bool {
+        if flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir) != 0 {
+            return false
+        }
+        let lower = path.lowercased()
+        return lower.hasSuffix(".json") || lower.hasSuffix(".jsonl")
     }
 
     private func sources(for root: Root, enabled: Set<AgentTool>) -> [Source] {
@@ -214,10 +223,10 @@ final class LogActivityWatcher {
             sources.append(.codexDesktop)
         }
 
-        // The CLI may finish quickly and close the file before the process probe
-        // catches it. Preserve the old CLI transcript behavior, but do not
-        // fabricate a desktop source unless the in-app agent tree exists.
-        if sources.isEmpty, enabled.contains(.codex) {
+        // If the user disabled Codex Desktop, preserve the old CLI-only
+        // transcript fallback. When both are enabled, unknown writes in the
+        // shared session directory are too ambiguous to hold sleep safely.
+        if sources.isEmpty, enabled.contains(.codex), !enabled.contains(.codexDesktop) {
             sources.append(.codex)
         }
         return sources

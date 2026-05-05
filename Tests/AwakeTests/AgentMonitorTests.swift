@@ -1,4 +1,5 @@
 import XCTest
+import CoreServices
 @testable import Awake
 
 final class AgentMonitorTests: XCTestCase {
@@ -58,20 +59,29 @@ final class AgentMonitorTests: XCTestCase {
         XCTAssertFalse(AgentMonitor.isCodexDesktopAgentWorkerCommand(command))
     }
 
-    func testCodexDesktopWorkerClassificationSkipsOnlyUiProcesses() {
-        XCTAssertTrue(AgentMonitor.isCodexDesktopAgentWorkerCommand(
+    func testCodexDesktopWorkerClassificationSkipsPersistentSupportProcesses() {
+        XCTAssertFalse(AgentMonitor.isCodexDesktopAgentWorkerCommand(
             "npm exec xcodebuildmcp@latest mcp"
         ))
-        XCTAssertTrue(AgentMonitor.isCodexDesktopAgentWorkerCommand(
+        XCTAssertFalse(AgentMonitor.isCodexDesktopAgentWorkerCommand(
             "/Applications/Codex.app/Contents/Resources/node_repl"
+        ))
+        XCTAssertFalse(AgentMonitor.isCodexDesktopAgentWorkerCommand(
+            "npm exec mcp-remote https://www.lazyweb.com/mcp --transport http-first"
+        ))
+        XCTAssertFalse(AgentMonitor.isCodexDesktopAgentWorkerCommand(
+            "node /Users/ahmed/Documents/production-tracker/scripts/mcp-server.ts"
+        ))
+        XCTAssertTrue(AgentMonitor.isCodexDesktopAgentWorkerCommand(
+            "/bin/zsh -lc swift test"
         ))
     }
 
     func testCodexActivityOwnersDoNotTreatOpenDesktopAppAsAgentActivity() {
         let ps = """
-          100     1 /Applications/Codex.app/Contents/MacOS/Codex
-          101   100 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
-          102   100 /Applications/Codex.app/Contents/Frameworks/Codex Helper.app/Contents/MacOS/Codex Helper --type=renderer
+          100     1   0.0 /Applications/Codex.app/Contents/MacOS/Codex
+          101   100   0.0 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
+          102   100   0.0 /Applications/Codex.app/Contents/Frameworks/Codex Helper.app/Contents/MacOS/Codex Helper --type=renderer
         """
 
         XCTAssertFalse(AgentMonitor.codexActivityOwners(psOutput: ps).contains(.codexDesktop))
@@ -80,9 +90,32 @@ final class AgentMonitorTests: XCTestCase {
 
     func testCodexActivityOwnersDetectDesktopWorkerUnderAppServer() {
         let ps = """
-          100     1 /Applications/Codex.app/Contents/MacOS/Codex
-          101   100 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
-          102   101 /Applications/Codex.app/Contents/Resources/node_repl
+          100     1   0.0 /Applications/Codex.app/Contents/MacOS/Codex
+          101   100   0.0 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
+          102   101   0.0 /bin/zsh -lc swift test
+        """
+
+        XCTAssertEqual(AgentMonitor.codexActivityOwners(psOutput: ps), [.codexDesktop])
+    }
+
+    func testCodexActivityOwnersIgnoreIdleDesktopSupportProcesses() {
+        let ps = """
+          100     1   0.0 /Applications/Codex.app/Contents/MacOS/Codex
+          101   100   0.0 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
+          102   101   0.0 /Applications/Codex.app/Contents/Resources/node_repl
+          103   101   0.0 npm exec xcodebuildmcp@latest mcp
+          104   101   0.0 npm exec @upstash/context7-mcp
+        """
+
+        XCTAssertFalse(AgentMonitor.codexActivityOwners(psOutput: ps).contains(.codexDesktop))
+    }
+
+    func testCodexActivityOwnersDetectBusyDesktopAppServer() {
+        let ps = """
+          100     1   0.0 /Applications/Codex.app/Contents/MacOS/Codex
+          101   100   7.5 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
+          102   101   0.0 /Applications/Codex.app/Contents/Resources/node_repl
+          103   101   0.0 npm exec xcodebuildmcp@latest mcp
         """
 
         XCTAssertEqual(AgentMonitor.codexActivityOwners(psOutput: ps), [.codexDesktop])
@@ -90,13 +123,22 @@ final class AgentMonitorTests: XCTestCase {
 
     func testCodexActivityOwnersDetectCliSeparatelyFromDesktop() {
         let ps = """
-          100     1 /Applications/Codex.app/Contents/MacOS/Codex
-          101   100 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
-          102   101 /Applications/Codex.app/Contents/Resources/node_repl
-          200     1 /opt/homebrew/bin/codex
+          100     1   0.0 /Applications/Codex.app/Contents/MacOS/Codex
+          101   100   6.0 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
+          102   101   0.0 /Applications/Codex.app/Contents/Resources/node_repl
+          200     1   3.0 /opt/homebrew/bin/codex
         """
 
         XCTAssertEqual(AgentMonitor.codexActivityOwners(psOutput: ps), [.codex, .codexDesktop])
+    }
+
+    func testCodexActivityOwnersIgnoreIdleCliSessionProcess() {
+        let ps = """
+          200     1   0.0 /opt/homebrew/bin/codex resume 019df43a-e67e-7f70-a879-7c75e2db2928
+          201   200   0.0 npm exec @upstash/context7-mcp
+        """
+
+        XCTAssertFalse(AgentMonitor.codexActivityOwners(psOutput: ps).contains(.codex))
     }
 
     func testDetectsClaudeAndCodexCLIsSeparatelyFromDesktopApps() {
@@ -108,6 +150,32 @@ final class AgentMonitorTests: XCTestCase {
             AgentMonitor.candidate(for: "/opt/homebrew/bin/codex", enabledTools: [.codex])?.kind,
             .codexCLI
         )
+    }
+
+    // MARK: - transcript watcher filters
+
+    func testTranscriptActivityPathIgnoresDirectories() {
+        let flags = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir)
+
+        XCTAssertFalse(LogActivityWatcher.isTranscriptActivityPath(
+            "/Users/ahmed/.codex/sessions/2026/05/05",
+            flags: flags
+        ))
+    }
+
+    func testTranscriptActivityPathAcceptsJsonTranscriptsOnly() {
+        XCTAssertTrue(LogActivityWatcher.isTranscriptActivityPath(
+            "/Users/ahmed/.codex/sessions/2026/05/05/rollout.jsonl"
+        ))
+        XCTAssertTrue(LogActivityWatcher.isTranscriptActivityPath(
+            "/Users/ahmed/Library/Application Support/Claude/claude-code-sessions/local_123.json"
+        ))
+        XCTAssertFalse(LogActivityWatcher.isTranscriptActivityPath(
+            "/Users/ahmed/.codex/sessions/2026/05/05"
+        ))
+        XCTAssertFalse(LogActivityWatcher.isTranscriptActivityPath(
+            "/Users/ahmed/.codex/sessions/2026/05/05/.DS_Store"
+        ))
     }
 
     // MARK: - remoteIP parser

@@ -3,11 +3,26 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# Load notarization credentials from .env if present
+# Load notarization credentials from .env if present. Parse KEY=value lines
+# directly instead of sourcing so unquoted spaces or parentheses in signing
+# identities do not break local builds.
 if [[ -f .env ]]; then
-  set -a
-  source .env
-  set +a
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+        value="${value:1:${#value}-2}"
+      elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+      export "$key=$value"
+    fi
+  done < .env
 fi
 
 CONFIG="release"

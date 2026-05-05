@@ -112,6 +112,37 @@ final class AwakeControllerTests: XCTestCase {
         })
     }
 
+    func testDesktopLogActivityExpiresAfterStickyWindow() {
+        let power = MockPowerManager()
+        let controller = AwakeController(power: power, lid: MockLidGuard(), startServices: false)
+        controller.waitForAgents = true
+        power.reset()
+
+        let stale = Date().addingTimeInterval(
+            -(max(AwakeController.desktopLogActivityHoldWindow, AwakeController.activityStickyHold) + 1)
+        )
+        controller.handleLogActivity(.codexDesktop, at: stale)
+
+        XCTAssertFalse(controller.logActiveSources.contains(.codexDesktop))
+        XCTAssertFalse(controller.agentDriven)
+        XCTAssertFalse(controller.isCaffeinated)
+        XCTAssertEqual(power.releaseCount, 1)
+    }
+
+    func testCliLogActivityKeepsLongerTranscriptHold() {
+        let controller = AwakeController(power: MockPowerManager(), lid: MockLidGuard(), startServices: false)
+        controller.waitForAgents = true
+
+        let olderThanDesktopHold = Date().addingTimeInterval(
+            -(AwakeController.desktopLogActivityHoldWindow + 1)
+        )
+        controller.handleLogActivity(.codex, at: olderThanDesktopHold)
+
+        XCTAssertTrue(controller.logActiveSources.contains(.codex))
+        XCTAssertTrue(controller.agentDriven)
+        XCTAssertTrue(controller.isCaffeinated)
+    }
+
     func testRestoreLidSleepDoesNotAskForPasswordWhenAlreadyNormal() async throws {
         let lid = MockLidGuard(currentlyDisabled: false, status: .installed)
         let controller = AwakeController(power: MockPowerManager(), lid: lid, startServices: false)

@@ -130,6 +130,10 @@ final class AwakeController: ObservableObject {
     /// in long-running tool execution (Bash downloads, WebFetch, etc.).
     static let logActivityHoldWindow: TimeInterval = 90
 
+    /// Desktop apps keep background helpers open after a turn. Use a shorter
+    /// transcript hold for those sources so "turn ended" releases promptly.
+    static let desktopLogActivityHoldWindow: TimeInterval = 30
+
     /// UI "currently in turn" window. Short, so the menu reflects the user's actual
     /// perception of when a turn ended.
     static let inTurnDisplayWindow: TimeInterval = 6
@@ -240,9 +244,10 @@ final class AwakeController: ObservableObject {
     /// Agent sources whose transcript was written recently — used for sleep decisions
     /// (long window, conservative).
     var logActiveSources: [LogActivityWatcher.Source] {
-        let cutoff = Date().addingTimeInterval(-Self.logActivityHoldWindow)
+        let now = Date()
         return lastLogActivity.compactMap { src, t in
-            enabledTools.contains(src.tool) && t > cutoff ? src : nil
+            let hold = Self.logActivityHoldWindow(for: src)
+            return enabledTools.contains(src.tool) && now.timeIntervalSince(t) < hold ? src : nil
         }
     }
 
@@ -597,7 +602,7 @@ final class AwakeController: ObservableObject {
 
     private func handleAgents(_ list: [DetectedAgent]) {
         detectedAgents = list
-        if anyAgentRightNow { lastActivityAt = Date() }
+        if !activeAgents.isEmpty { lastActivityAt = Date() }
         sync()
     }
 
@@ -615,6 +620,15 @@ final class AwakeController: ObservableObject {
         }
         if !anyAgentRightNow {
             lastActivityAt = nil
+        }
+    }
+
+    private static func logActivityHoldWindow(for source: LogActivityWatcher.Source) -> TimeInterval {
+        switch source {
+        case .claudeDesktop, .codexDesktop:
+            return desktopLogActivityHoldWindow
+        case .claude, .codex, .opencode:
+            return logActivityHoldWindow
         }
     }
 

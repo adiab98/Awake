@@ -42,9 +42,9 @@ struct DetectedAgent: Identifiable, Hashable {
 final class AgentMonitor {
     var onUpdate: (([DetectedAgent]) -> Void)?
 
-    /// Threshold for total CPU% across the agent's process tree. The MCP-server idle
-    /// floor sits around 2-5%; real in-turn work pushes well above this. Set lower
-    /// for sensitivity; the sticky-hold window in the controller bridges quiet gaps.
+    /// Threshold for total CPU% across the agent's active process tree. Persistent
+    /// MCP helpers can sit around 2-5%; real in-turn work pushes well above this.
+    /// Set lower for sensitivity; the sticky-hold window bridges quiet gaps.
     var cpuActivityThreshold: Double = 5.0
 
     /// Filter — only tools in this set produce detection results. Read on every
@@ -83,6 +83,7 @@ final class AgentMonitor {
 
     /// Per-agent: total cumulative CPU seconds across the process tree at the previous poll.
     private var lastTreeCpuSample: [Int32: (taken: Date, totalCpu: Double)] = [:]
+    private static let codexDesktopOwnerCpuThreshold = 1.0
 
     private static let claudeRegex = try! NSRegularExpression(
         pattern: #"(^|[\s/])claude(?:\.[a-z]+)?(?:\s|$)"#,
@@ -221,7 +222,7 @@ final class AgentMonitor {
             }
 
             let cpuActive = (recentTreeCpu ?? treeCurrentCpu) >= cpuActivityThreshold
-            let networkTree = tree.filter { !isMcpServer(procs[$0]?.command ?? "") }
+            let networkTree = tree.filter { !Self.isMcpServerCommand(procs[$0]?.command ?? "") }
             let networkActive = cpuActive ? false : hasNetworkActivity(treePids: networkTree)
             let active = cpuActive || networkActive
             results.append(DetectedAgent(
@@ -237,27 +238,28 @@ final class AgentMonitor {
 
         for pid in codexDesktopServerPids {
             let tree = descendants(of: pid, in: childrenOf)
-            let workerTree = tree.filter { workerPid in
-                guard workerPid != pid else { return false }
+            let activeTree = tree.filter { workerPid in
+                guard workerPid != pid else { return true }
                 return Self.isCodexDesktopAgentWorkerCommand(procs[workerPid]?.command ?? "")
             }
-            guard !workerTree.isEmpty else { continue }
 
-            let workerCpu = workerTree.reduce(0.0) { sum, pid in sum + (procs[pid]?.cpuSec ?? 0) }
-            let workerCurrentCpu = workerTree.reduce(0.0) { sum, pid in sum + (procs[pid]?.cpuPercent ?? 0) }
-            newSamples[pid] = (now, workerCpu)
+            let activeCpu = activeTree.reduce(0.0) { sum, pid in sum + (procs[pid]?.cpuSec ?? 0) }
+            let activeCurrentCpu = activeTree.reduce(0.0) { sum, pid in sum + (procs[pid]?.cpuPercent ?? 0) }
+            newSamples[pid] = (now, activeCpu)
 
-            var recentWorkerCpu: Double? = nil
+            var recentActiveCpu: Double? = nil
             if let prev = lastTreeCpuSample[pid] {
                 let dt = now.timeIntervalSince(prev.taken)
                 if dt > 0 {
-                    let dCpu = workerCpu - prev.totalCpu
-                    recentWorkerCpu = max(0, (dCpu / dt) * 100.0)
+                    let dCpu = activeCpu - prev.totalCpu
+                    recentActiveCpu = max(0, (dCpu / dt) * 100.0)
                 }
             }
 
-            let cpuActive = (recentWorkerCpu ?? workerCurrentCpu) >= cpuActivityThreshold
-            let networkTree = workerTree.filter { !isMcpServer(procs[$0]?.command ?? "") }
+            let cpuActive = (recentActiveCpu ?? activeCurrentCpu) >= cpuActivityThreshold
+            let networkTree = activeTree.filter {
+                $0 != pid && !Self.isMcpServerCommand(procs[$0]?.command ?? "")
+            }
             let networkActive = cpuActive ? false : hasNetworkActivity(treePids: networkTree)
             let active = cpuActive || networkActive
             guard active else { continue }
@@ -267,7 +269,7 @@ final class AgentMonitor {
                 label: "codex desktop agent",
                 kind: .codexApp,
                 parentCpuSeconds: procs[pid]?.cpuSec ?? 0,
-                treeCpuPercent: recentWorkerCpu,
+                treeCpuPercent: recentActiveCpu,
                 isActive: true,
                 hasNetworkActivity: networkActive
             ))
@@ -345,8 +347,10 @@ final class AgentMonitor {
         let lc = command.lowercased()
         if lc.contains("/codex.app/contents/frameworks/") { return false }
         if lc.contains("/codex.app/contents/macos/codex") { return false }
+        if lc.contains("/codex.app/contents/resources/node_repl") { return false }
         if isCodexDesktopAppServerCommand(command) { return false }
         if lc.contains("chrome_crashpad_handler") { return false }
+        if isMcpServerCommand(command) { return false }
         return true
     }
 
@@ -356,31 +360,46 @@ final class AgentMonitor {
     static func codexActivityOwners(psOutput: String? = nil) -> Set<AgentTool> {
         let output = psOutput ?? captureOutput(
             "/bin/ps",
-            ["-axww", "-o", "pid=,ppid=,command="]
+            ["-axww", "-o", "pid=,ppid=,%cpu=,command="]
         )
         guard let output else { return [] }
 
-        let (commands, childrenOf) = parsePidPpidCommands(output)
+        let (processes, childrenOf) = parsePidPpidCommands(output)
         var owners = Set<AgentTool>()
         var appServerPids: [Int32] = []
+        var codexCliPids: [Int32] = []
 
-        for (pid, command) in commands {
-            if isCodexDesktopAppServerCommand(command) {
+        for (pid, info) in processes {
+            if isCodexDesktopAppServerCommand(info.command) {
                 appServerPids.append(pid)
                 continue
             }
-            if candidate(for: command, enabledTools: [.codex])?.kind == .codexCLI {
+            if candidate(for: info.command, enabledTools: [.codex])?.kind == .codexCLI {
+                codexCliPids.append(pid)
+            }
+        }
+
+        for pid in codexCliPids {
+            let cliCpu = processes[pid]?.cpuPercent ?? 0
+            let tree = descendants(of: pid, in: childrenOf)
+            let hasTurnScopedWorker = tree.contains { workerPid in
+                guard workerPid != pid else { return false }
+                return isCodexCLIWorkerCommand(processes[workerPid]?.command ?? "")
+            }
+            if cliCpu >= codexDesktopOwnerCpuThreshold || hasTurnScopedWorker {
                 owners.insert(.codex)
             }
         }
 
         for pid in appServerPids {
             let tree = descendants(of: pid, in: childrenOf)
-            let hasAgentWorker = tree.contains { workerPid in
+            let appServerCpu = processes[pid]?.cpuPercent ?? 0
+            let hasActiveAppServer = appServerCpu >= codexDesktopOwnerCpuThreshold
+            let hasTurnScopedWorker = tree.contains { workerPid in
                 guard workerPid != pid else { return false }
-                return isCodexDesktopAgentWorkerCommand(commands[workerPid] ?? "")
+                return isCodexDesktopAgentWorkerCommand(processes[workerPid]?.command ?? "")
             }
-            if hasAgentWorker {
+            if hasActiveAppServer || hasTurnScopedWorker {
                 owners.insert(.codexDesktop)
             }
         }
@@ -388,13 +407,25 @@ final class AgentMonitor {
         return owners
     }
 
+    static func isCodexCLIWorkerCommand(_ command: String) -> Bool {
+        let lc = command.lowercased()
+        if isMcpServerCommand(command) { return false }
+        if lc.contains("chrome_crashpad_handler") { return false }
+        return true
+    }
+
     /// Heuristic: is this command line an MCP server? They keep persistent connections
     /// to remote services (Slack, Upstash, GitHub, etc.) and would otherwise produce
     /// false positives in the network-activity check.
-    private func isMcpServer(_ command: String) -> Bool {
+    static func isMcpServerCommand(_ command: String) -> Bool {
         let lc = command.lowercased()
         if lc.contains("@modelcontextprotocol") { return true }
         if lc.contains("@upstash") { return true }
+        if lc.contains("mcp-remote") { return true }
+        if lc.contains("context7-mcp") { return true }
+        if lc.contains("xcodebuildmcp") { return true }
+        if lc.contains("aso-mcp") { return true }
+        if lc.contains("mcp-server") || lc.contains("mcp_server") { return true }
         if lc.contains("-mcp") { return true }
         if lc.contains("/mcp/") || lc.contains("mcp.js") || lc.contains("mcp/cli") { return true }
         // common pattern: "npm exec ...mcp..." or "node ... mcp ..."
@@ -537,26 +568,40 @@ final class AgentMonitor {
         return out
     }
 
+    private struct CommandInfo {
+        let cpuPercent: Double
+        let command: String
+    }
+
     private static func parsePidPpidCommands(_ psOut: String) -> (
-        commands: [Int32: String],
+        processes: [Int32: CommandInfo],
         childrenOf: [Int32: [Int32]]
     ) {
-        var commands: [Int32: String] = [:]
+        var processes: [Int32: CommandInfo] = [:]
         var childrenOf: [Int32: [Int32]] = [:]
         for line in psOut.split(separator: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             let parts = trimmed.split(
-                maxSplits: 2,
+                maxSplits: 3,
                 omittingEmptySubsequences: true,
                 whereSeparator: { $0 == " " || $0 == "\t" }
             )
-            guard parts.count == 3,
+            guard parts.count == 3 || parts.count == 4,
                   let pid = Int32(parts[0]),
                   let ppid = Int32(parts[1]) else { continue }
-            commands[pid] = String(parts[2])
+            let cpuPercent: Double
+            let command: String
+            if parts.count == 4, let parsedCpu = Double(String(parts[2])) {
+                cpuPercent = parsedCpu
+                command = String(parts[3])
+            } else {
+                cpuPercent = 0
+                command = String(parts[2])
+            }
+            processes[pid] = CommandInfo(cpuPercent: cpuPercent, command: command)
             childrenOf[ppid, default: []].append(pid)
         }
-        return (commands, childrenOf)
+        return (processes, childrenOf)
     }
 
     // MARK: - Process helpers
