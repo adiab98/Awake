@@ -3,6 +3,7 @@ import AppKit
 
 @MainActor
 enum MoreWindow {
+    private static let contentSize = NSSize(width: 520, height: 760)
     private static var window: NSWindow?
     private static var closeObserver: NSObjectProtocol?
 
@@ -20,13 +21,16 @@ enum MoreWindow {
             rootView: MoreView().environmentObject(controller)
         )
         let w = NSWindow(contentViewController: host)
-        w.styleMask = [.titled, .closable, .resizable, .fullSizeContentView]
+        w.styleMask = [.titled, .closable, .fullSizeContentView]
         w.titlebarAppearsTransparent = true
         w.titleVisibility = .hidden
         w.isReleasedWhenClosed = false
         w.title = "Awake"
-        w.setContentSize(NSSize(width: 380, height: 520))
-        w.minSize = NSSize(width: 360, height: 360)
+        w.setContentSize(Self.contentSize)
+        w.contentMinSize = Self.contentSize
+        w.contentMaxSize = Self.contentSize
+        w.standardWindowButton(.zoomButton)?.isEnabled = false
+        w.collectionBehavior.remove(.fullScreenPrimary)
         w.center()
         closeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
@@ -51,10 +55,8 @@ private struct MoreView: View {
     @EnvironmentObject var controller: AwakeController
 
     var body: some View {
-        ScrollView {
-            content
-        }
-        .frame(minWidth: 360, idealWidth: 380, minHeight: 360)
+        content
+        .frame(width: 520, height: 760)
         .background(MoreMaterial())
     }
 
@@ -179,7 +181,7 @@ private struct MoreView: View {
                 Text("Closed-lid support")
                     .font(.system(size: 13, weight: .semibold))
 
-                Text("The Mac App Store build uses public macOS power assertions. Closed-lid support requires a separate helper that is not included in this app.")
+                Text("The Mac App Store build uses public macOS power assertions. Closed-lid support is available in the direct-download edition.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -188,7 +190,7 @@ private struct MoreView: View {
                     controller.openClosedLidHelp()
                 }
                 .controlSize(.small)
-                .accessibilityHint("Opens details about Awake's separate closed-lid helper")
+                .accessibilityHint("Opens details about Awake's direct-download closed-lid support")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 28)

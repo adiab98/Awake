@@ -90,6 +90,11 @@ final class AwakeController: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: Self.hasOfferedToolPickerKey) }
     }
 
+    /// Desktop agent detection was added after the original CLI-only defaults.
+    /// Existing users who enabled Codex/Claude should pick up the matching
+    /// desktop in-app agent source once, without waiting for another onboarding.
+    private static let didMigrateDesktopToolsKey = "didMigrateDesktopAgentToolsV1"
+
     /// Which AI tools detection runs for. Mutated by onboarding + More toggles;
     /// pushed down to AgentMonitor and LogActivityWatcher on every change.
     @Published private(set) var enabledTools: Set<AgentTool> {
@@ -173,10 +178,7 @@ final class AwakeController: ObservableObject {
     ) {
         self.power = power
         self.lid = lid
-        // Default: stable CLI/file-based tools enabled. Persisted choices
-        // override this; new tools added in future builds stay disabled for
-        // existing users until they opt in.
-        self.enabledTools = AgentToolStore.load() ?? AgentTool.defaultEnabled
+        self.enabledTools = Self.initialEnabledTools()
         // Seed install status synchronously. The probe is two `sudo -n -l` calls
         // (or a noop in the mock) — fast enough that paying the cost up-front beats
         // a brief UI flash showing "not installed" on real launches.
@@ -197,6 +199,35 @@ final class AwakeController: ObservableObject {
         }
         guard startServices else { return }
         startBackgroundServices()
+    }
+
+    private static func initialEnabledTools() -> Set<AgentTool> {
+        guard var tools = AgentToolStore.load() else {
+            let defaults = AgentTool.defaultEnabled
+            AgentToolStore.save(defaults)
+            UserDefaults.standard.synchronize()
+            return defaults
+        }
+
+        guard !UserDefaults.standard.bool(forKey: didMigrateDesktopToolsKey) else {
+            return tools
+        }
+
+        var changed = false
+        if tools.contains(.codex), !tools.contains(.codexDesktop) {
+            tools.insert(.codexDesktop)
+            changed = true
+        }
+        if tools.contains(.claude), !tools.contains(.claudeDesktop) {
+            tools.insert(.claudeDesktop)
+            changed = true
+        }
+        UserDefaults.standard.set(true, forKey: didMigrateDesktopToolsKey)
+        if changed {
+            AgentToolStore.save(tools)
+        }
+        UserDefaults.standard.synchronize()
+        return tools
     }
 
     // MARK: - Derived state
@@ -444,7 +475,8 @@ final class AwakeController: ObservableObject {
             checkboxes.append((tool, btn))
         }
         // Width tweak so all checkbox labels render comfortably.
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 110))
+        let containerHeight = CGFloat(AgentTool.allCases.count * 24 + 12)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: containerHeight))
         stack.frame = container.bounds
         container.addSubview(stack)
         alert.accessoryView = container

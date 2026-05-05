@@ -14,8 +14,9 @@ that feature out.
 
 Amphetamine uses a similar split. Its App Store listing says Power Protect is not
 included directly and requires a separate download/installation. For Awake, the
-App Store binary may link to documentation about the separate helper, but it
-must not download, install, or run that helper from inside the App Store app.
+App Store binary may link to documentation about the direct-download edition,
+but it must not download, install, or run extra privileged code from inside the
+App Store app.
 
 ## Browser handoff
 
@@ -71,9 +72,10 @@ Tasks:
    record or uploading the build. Report exactly what was created/uploaded and
    any remaining blocker.
 
-Important: do not revert local code changes. If the archive must be regenerated,
-use the existing `Awake.xcodeproj` and preserve the APP_STORE compilation
-condition.
+Important: do not revert local code changes. The checked-in Xcode project is the
+direct-download/GitHub build and includes closed-lid support. Regenerate the Mac
+App Store archive only through the App Store build path so the `APP_STORE`
+compilation condition and sandbox entitlements are applied.
 ```
 
 ## Listing copy
@@ -103,8 +105,8 @@ Features:
 - No cloud account, no analytics, and no transcript upload
 
 Closed-lid support is not included directly in the Mac App Store build. The app
-links to information about a separate direct-download helper for users who choose
-to install it outside the store.
+links to information about the separate direct-download edition for users who
+choose to install it outside the store.
 ```
 
 Keywords:

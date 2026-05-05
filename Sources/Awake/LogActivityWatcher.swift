@@ -56,6 +56,7 @@ final class LogActivityWatcher {
     private let queue = DispatchQueue(label: "awake.fsevents")
     private let rootsLock = NSLock()
     private var retryTimer: Timer?
+    private var codexOwnerCache: (taken: Date, owners: Set<AgentTool>)?
 
     init() {
         // Only watch the *session transcript* directories — these are written when an
@@ -189,7 +190,7 @@ final class LogActivityWatcher {
     private func handleEvent(forPath p: String) {
         let enabled = enabledTools
         for root in rootsSnapshot() where p.hasPrefix(root.path) {
-            let sources = root.sources.filter { enabled.contains($0.tool) }
+            let sources = sources(for: root, enabled: enabled)
             guard !sources.isEmpty else { return }
             for source in sources {
                 watcherLog.debug("fsevent source=\(source.rawValue, privacy: .public) path=\(p, privacy: .public)")
@@ -197,6 +198,39 @@ final class LogActivityWatcher {
             }
             return
         }
+    }
+
+    private func sources(for root: Root, enabled: Set<AgentTool>) -> [Source] {
+        guard root.sources.contains(.codex), root.sources.contains(.codexDesktop) else {
+            return root.sources.filter { enabled.contains($0.tool) }
+        }
+
+        let owners = currentCodexOwners()
+        var sources: [Source] = []
+        if owners.contains(.codex), enabled.contains(.codex) {
+            sources.append(.codex)
+        }
+        if owners.contains(.codexDesktop), enabled.contains(.codexDesktop) {
+            sources.append(.codexDesktop)
+        }
+
+        // The CLI may finish quickly and close the file before the process probe
+        // catches it. Preserve the old CLI transcript behavior, but do not
+        // fabricate a desktop source unless the in-app agent tree exists.
+        if sources.isEmpty, enabled.contains(.codex) {
+            sources.append(.codex)
+        }
+        return sources
+    }
+
+    private func currentCodexOwners() -> Set<AgentTool> {
+        let now = Date()
+        if let cached = codexOwnerCache, now.timeIntervalSince(cached.taken) < 1 {
+            return cached.owners
+        }
+        let owners = AgentMonitor.codexActivityOwners()
+        codexOwnerCache = (now, owners)
+        return owners
     }
 
     private func rootsSnapshot() -> [Root] {

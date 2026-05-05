@@ -14,7 +14,7 @@ enum AgentTool: String, CaseIterable, Codable, Sendable, Identifiable {
     var id: String { rawValue }
 
     static var defaultEnabled: Set<AgentTool> {
-        [.claude, .codex, .cursor, .opencode]
+        [.claude, .claudeDesktop, .codex, .codexDesktop, .cursor, .opencode]
     }
 
     var displayName: String {

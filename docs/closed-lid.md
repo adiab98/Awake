@@ -4,11 +4,11 @@ Awake's Mac App Store build keeps your Mac awake with public macOS power
 assertions. Those APIs can prevent idle system sleep while a session is active,
 but they do not override every hardware lid-close sleep path.
 
-For users who choose closed-lid support, Awake uses a separate direct-download
-edition/helper outside the Mac App Store. The Mac App Store app only links to
-this explanation. It does not download, install, or execute the helper.
+For users who choose closed-lid support, Awake uses the direct-download edition
+outside the Mac App Store. The Mac App Store app only links to this explanation.
+It does not download, install, or execute extra code.
 
-## How The Helper Works
+## How Closed-Lid Support Works
 
 The direct-download edition can install a narrow administrator-approved rule at:
 
@@ -25,7 +25,7 @@ That rule allows only these two exact commands:
 
 Awake uses those commands to turn the lid-close sleep override on while an Awake
 session is active, then restore normal lid sleep when the session ends. The
-helper does not grant a shell, wildcard command access, or broad root access.
+rule does not grant a shell, wildcard command access, or broad root access.
 
 ## Install Path
 

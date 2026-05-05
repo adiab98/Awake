@@ -41,6 +41,7 @@ final class AgentMonitorTests: XCTestCase {
         let command = "/Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled"
 
         XCTAssertNil(AgentMonitor.candidate(for: command, enabledTools: [.codexDesktop]))
+        XCTAssertNil(AgentMonitor.candidate(for: command, enabledTools: [.codex]))
         XCTAssertTrue(AgentMonitor.isCodexDesktopAppServerCommand(command))
     }
 
@@ -64,6 +65,38 @@ final class AgentMonitorTests: XCTestCase {
         XCTAssertTrue(AgentMonitor.isCodexDesktopAgentWorkerCommand(
             "/Applications/Codex.app/Contents/Resources/node_repl"
         ))
+    }
+
+    func testCodexActivityOwnersDoNotTreatOpenDesktopAppAsAgentActivity() {
+        let ps = """
+          100     1 /Applications/Codex.app/Contents/MacOS/Codex
+          101   100 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
+          102   100 /Applications/Codex.app/Contents/Frameworks/Codex Helper.app/Contents/MacOS/Codex Helper --type=renderer
+        """
+
+        XCTAssertFalse(AgentMonitor.codexActivityOwners(psOutput: ps).contains(.codexDesktop))
+        XCTAssertFalse(AgentMonitor.codexActivityOwners(psOutput: ps).contains(.codex))
+    }
+
+    func testCodexActivityOwnersDetectDesktopWorkerUnderAppServer() {
+        let ps = """
+          100     1 /Applications/Codex.app/Contents/MacOS/Codex
+          101   100 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
+          102   101 /Applications/Codex.app/Contents/Resources/node_repl
+        """
+
+        XCTAssertEqual(AgentMonitor.codexActivityOwners(psOutput: ps), [.codexDesktop])
+    }
+
+    func testCodexActivityOwnersDetectCliSeparatelyFromDesktop() {
+        let ps = """
+          100     1 /Applications/Codex.app/Contents/MacOS/Codex
+          101   100 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
+          102   101 /Applications/Codex.app/Contents/Resources/node_repl
+          200     1 /opt/homebrew/bin/codex
+        """
+
+        XCTAssertEqual(AgentMonitor.codexActivityOwners(psOutput: ps), [.codex, .codexDesktop])
     }
 
     func testDetectsClaudeAndCodexCLIsSeparatelyFromDesktopApps() {

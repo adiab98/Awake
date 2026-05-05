@@ -14,6 +14,7 @@ CONFIG="release"
 APP_NAME="Awake"
 BUNDLE_ID="com.diabdiab.awake"
 VERSION="0.1"
+BUILD_NUMBER="${BUILD_NUMBER:-3}"
 
 echo "▸ swift build -c $CONFIG (universal: arm64 + x86_64)"
 swift build -c "$CONFIG" --arch arm64 --arch x86_64
@@ -50,7 +51,7 @@ cat > "$OUT/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key><string>$APP_NAME</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHumanReadableCopyright</key><string>© 2026 Awake.</string>

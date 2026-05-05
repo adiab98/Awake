@@ -11,10 +11,30 @@ final class AwakeControllerTests: XCTestCase {
         let defaults = UserDefaults.standard
         for key in [
             "waitForAgents", "lidGuardEnabledV2", "preventDisplaySleep",
-            "lastTimerMinutes", "hasOfferedLidSetup", "enabledAgentTools"
+            "lastTimerMinutes", "hasOfferedLidSetup", "enabledAgentTools",
+            "didMigrateDesktopAgentToolsV1"
         ] {
             defaults.removeObject(forKey: key)
         }
+    }
+
+    func testDefaultToolsIncludeDesktopAgentSources() {
+        let controller = AwakeController(power: MockPowerManager(), lid: MockLidGuard(), startServices: false)
+
+        XCTAssertTrue(controller.enabledTools.contains(.codexDesktop))
+        XCTAssertTrue(controller.enabledTools.contains(.claudeDesktop))
+    }
+
+    func testExistingCliToolPreferencesMigrateMatchingDesktopSources() {
+        AgentToolStore.save([.codex, .opencode])
+
+        let controller = AwakeController(power: MockPowerManager(), lid: MockLidGuard(), startServices: false)
+
+        XCTAssertTrue(controller.enabledTools.contains(.codex))
+        XCTAssertTrue(controller.enabledTools.contains(.codexDesktop))
+        XCTAssertTrue(controller.enabledTools.contains(.opencode))
+        XCTAssertFalse(controller.enabledTools.contains(.claudeDesktop))
+        XCTAssertEqual(AgentToolStore.load() ?? [], controller.enabledTools)
     }
 
     func testTimerToggleStartsTimedAwakeSession() {

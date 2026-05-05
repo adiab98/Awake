@@ -93,8 +93,8 @@ to ad-hoc signing for local use.
 swift test
 ```
 
-29 tests, including a roundtrip that pipes the generated sudoers body through
-`visudo -c` to confirm the format stays valid.
+The test suite includes process-detection coverage and a roundtrip that pipes
+the generated sudoers body through `visudo -c` to confirm the format stays valid.
 
 ## License
 

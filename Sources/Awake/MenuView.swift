@@ -167,7 +167,7 @@ struct MenuView: View {
             // Lid + display
             VStack(alignment: .leading, spacing: 6) {
                 #if APP_STORE
-                Text("Closed-lid support uses a separate helper.")
+                Text("Closed-lid support uses the direct-download edition.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -175,7 +175,7 @@ struct MenuView: View {
                     controller.openClosedLidHelp()
                 }
                 .controlSize(.small)
-                .accessibilityHint("Opens details about Awake's separate closed-lid helper")
+                .accessibilityHint("Opens details about Awake's direct-download closed-lid support")
                 #else
                 MenuToggle(
                     title: "Stay awake with lid closed",

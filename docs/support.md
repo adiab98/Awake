@@ -13,7 +13,7 @@ agents and long-running tasks are active.
 
 The Mac App Store version uses public macOS power assertions and does not include
 closed-lid support directly. Closed-lid support is available only through a
-separate direct-download helper:
+separate direct-download edition:
 
 https://github.com/adiab98/Awake/blob/main/docs/closed-lid.md
 

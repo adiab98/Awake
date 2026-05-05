@@ -301,6 +301,9 @@ final class AgentMonitor {
                 ? ("claude desktop agent", .claudeApp)
                 : nil
         }
+        if Self.isCodexDesktopAppServerCommand(command) {
+            return nil
+        }
         if cmdLower.contains(".app/contents/macos/claude")
             || cmdLower.contains(".app/contents/macos/codex")
             || cmdLower.contains(".app/contents/frameworks/") {
@@ -345,6 +348,44 @@ final class AgentMonitor {
         if isCodexDesktopAppServerCommand(command) { return false }
         if lc.contains("chrome_crashpad_handler") { return false }
         return true
+    }
+
+    /// The Codex CLI and Codex Desktop currently share `~/.codex/sessions`.
+    /// Use the live process tree to decide which owner(s) a transcript write can
+    /// plausibly belong to, instead of crediting every write to both tools.
+    static func codexActivityOwners(psOutput: String? = nil) -> Set<AgentTool> {
+        let output = psOutput ?? captureOutput(
+            "/bin/ps",
+            ["-axww", "-o", "pid=,ppid=,command="]
+        )
+        guard let output else { return [] }
+
+        let (commands, childrenOf) = parsePidPpidCommands(output)
+        var owners = Set<AgentTool>()
+        var appServerPids: [Int32] = []
+
+        for (pid, command) in commands {
+            if isCodexDesktopAppServerCommand(command) {
+                appServerPids.append(pid)
+                continue
+            }
+            if candidate(for: command, enabledTools: [.codex])?.kind == .codexCLI {
+                owners.insert(.codex)
+            }
+        }
+
+        for pid in appServerPids {
+            let tree = descendants(of: pid, in: childrenOf)
+            let hasAgentWorker = tree.contains { workerPid in
+                guard workerPid != pid else { return false }
+                return isCodexDesktopAgentWorkerCommand(commands[workerPid] ?? "")
+            }
+            if hasAgentWorker {
+                owners.insert(.codexDesktop)
+            }
+        }
+
+        return owners
     }
 
     /// Heuristic: is this command line an MCP server? They keep persistent connections
@@ -478,6 +519,11 @@ final class AgentMonitor {
 
     /// Returns [rootPid] + every transitive descendant.
     private func descendants(of root: Int32, in childrenOf: [Int32: [Int32]]) -> [Int32] {
+        Self.descendants(of: root, in: childrenOf)
+    }
+
+    /// Returns [rootPid] + every transitive descendant.
+    private static func descendants(of root: Int32, in childrenOf: [Int32: [Int32]]) -> [Int32] {
         var out: [Int32] = [root]
         var stack: [Int32] = [root]
         while let pid = stack.popLast() {
@@ -491,7 +537,44 @@ final class AgentMonitor {
         return out
     }
 
+    private static func parsePidPpidCommands(_ psOut: String) -> (
+        commands: [Int32: String],
+        childrenOf: [Int32: [Int32]]
+    ) {
+        var commands: [Int32: String] = [:]
+        var childrenOf: [Int32: [Int32]] = [:]
+        for line in psOut.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let parts = trimmed.split(
+                maxSplits: 2,
+                omittingEmptySubsequences: true,
+                whereSeparator: { $0 == " " || $0 == "\t" }
+            )
+            guard parts.count == 3,
+                  let pid = Int32(parts[0]),
+                  let ppid = Int32(parts[1]) else { continue }
+            commands[pid] = String(parts[2])
+            childrenOf[ppid, default: []].append(pid)
+        }
+        return (commands, childrenOf)
+    }
+
     // MARK: - Process helpers
+
+    private static func captureOutput(_ path: String, _ args: [String]) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        let out = Pipe()
+        let err = Pipe()
+        p.standardOutput = out
+        p.standardError = err
+        do { try p.run() } catch { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        _ = err.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(data: data, encoding: .utf8)
+    }
 
     /// Run a binary and capture stdout. Drains stdout before waiting on exit so we don't
     /// deadlock when the child writes more than the pipe buffer (~64KB).
