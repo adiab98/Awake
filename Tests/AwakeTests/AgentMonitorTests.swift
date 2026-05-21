@@ -67,6 +67,12 @@ final class AgentMonitorTests: XCTestCase {
             "/Applications/Codex.app/Contents/Resources/node_repl"
         ))
         XCTAssertFalse(AgentMonitor.isCodexDesktopAgentWorkerCommand(
+            "/Applications/Codex.app/Contents/Resources/node --experimental-vm-modules /var/folders/tmp/kernel.js --session-id abc --working-dir /Users/ahmed/Documents/Awake"
+        ))
+        XCTAssertFalse(AgentMonitor.isCodexDesktopAgentWorkerCommand(
+            "./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient mcp"
+        ))
+        XCTAssertFalse(AgentMonitor.isCodexDesktopAgentWorkerCommand(
             "npm exec mcp-remote https://www.lazyweb.com/mcp --transport http-first"
         ))
         XCTAssertFalse(AgentMonitor.isCodexDesktopAgentWorkerCommand(
@@ -110,7 +116,7 @@ final class AgentMonitorTests: XCTestCase {
         XCTAssertFalse(AgentMonitor.codexActivityOwners(psOutput: ps).contains(.codexDesktop))
     }
 
-    func testCodexActivityOwnersDetectBusyDesktopAppServer() {
+    func testCodexActivityOwnersIgnoreBusyDesktopAppServerWithoutTurnWorker() {
         let ps = """
           100     1   0.0 /Applications/Codex.app/Contents/MacOS/Codex
           101   100   7.5 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
@@ -118,14 +124,27 @@ final class AgentMonitorTests: XCTestCase {
           103   101   0.0 npm exec xcodebuildmcp@latest mcp
         """
 
-        XCTAssertEqual(AgentMonitor.codexActivityOwners(psOutput: ps), [.codexDesktop])
+        XCTAssertFalse(AgentMonitor.codexActivityOwners(psOutput: ps).contains(.codexDesktop))
+    }
+
+    func testCodexActivityOwnersIgnoreDesktopPersistentChildren() {
+        let ps = """
+          100     1   0.0 /Applications/Codex.app/Contents/MacOS/Codex
+          101   100   0.0 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
+          102   101   0.0 /Applications/Codex.app/Contents/Resources/node_repl
+          103   102   0.0 /Applications/Codex.app/Contents/Resources/node --experimental-vm-modules /var/folders/tmp/kernel.js --session-id abc --working-dir /Users/ahmed/Documents/Awake
+          104   101   1.2 ./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient mcp
+        """
+
+        XCTAssertFalse(AgentMonitor.codexActivityOwners(psOutput: ps).contains(.codexDesktop))
     }
 
     func testCodexActivityOwnersDetectCliSeparatelyFromDesktop() {
         let ps = """
           100     1   0.0 /Applications/Codex.app/Contents/MacOS/Codex
-          101   100   6.0 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
+          101   100   0.0 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
           102   101   0.0 /Applications/Codex.app/Contents/Resources/node_repl
+          103   101   0.0 /bin/zsh -lc swift test
           200     1   3.0 /opt/homebrew/bin/codex
         """
 

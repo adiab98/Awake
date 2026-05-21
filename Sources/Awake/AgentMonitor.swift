@@ -238,13 +238,13 @@ final class AgentMonitor {
 
         for pid in codexDesktopServerPids {
             let tree = descendants(of: pid, in: childrenOf)
-            let activeTree = tree.filter { workerPid in
-                guard workerPid != pid else { return true }
-                return Self.isCodexDesktopAgentWorkerCommand(procs[workerPid]?.command ?? "")
+            let activeWorkers = tree.filter { workerPid in
+                workerPid != pid
+                    && Self.isCodexDesktopAgentWorkerCommand(procs[workerPid]?.command ?? "")
             }
 
-            let activeCpu = activeTree.reduce(0.0) { sum, pid in sum + (procs[pid]?.cpuSec ?? 0) }
-            let activeCurrentCpu = activeTree.reduce(0.0) { sum, pid in sum + (procs[pid]?.cpuPercent ?? 0) }
+            let activeCpu = activeWorkers.reduce(0.0) { sum, pid in sum + (procs[pid]?.cpuSec ?? 0) }
+            let activeCurrentCpu = activeWorkers.reduce(0.0) { sum, pid in sum + (procs[pid]?.cpuPercent ?? 0) }
             newSamples[pid] = (now, activeCpu)
 
             var recentActiveCpu: Double? = nil
@@ -257,9 +257,7 @@ final class AgentMonitor {
             }
 
             let cpuActive = (recentActiveCpu ?? activeCurrentCpu) >= cpuActivityThreshold
-            let networkTree = activeTree.filter {
-                $0 != pid && !Self.isMcpServerCommand(procs[$0]?.command ?? "")
-            }
+            let networkTree = activeWorkers.filter { !Self.isMcpServerCommand(procs[$0]?.command ?? "") }
             let networkActive = cpuActive ? false : hasNetworkActivity(treePids: networkTree)
             let active = cpuActive || networkActive
             guard active else { continue }
@@ -348,6 +346,15 @@ final class AgentMonitor {
         if lc.contains("/codex.app/contents/frameworks/") { return false }
         if lc.contains("/codex.app/contents/macos/codex") { return false }
         if lc.contains("/codex.app/contents/resources/node_repl") { return false }
+        if lc.contains("/codex.app/contents/resources/node ")
+            && lc.contains("/kernel.js")
+            && lc.contains("--session-id") {
+            return false
+        }
+        if lc.contains("codex computer use.app/contents/sharedsupport")
+            || lc.contains("skycomputeruseclient") {
+            return false
+        }
         if isCodexDesktopAppServerCommand(command) { return false }
         if lc.contains("chrome_crashpad_handler") { return false }
         if isMcpServerCommand(command) { return false }
@@ -393,13 +400,11 @@ final class AgentMonitor {
 
         for pid in appServerPids {
             let tree = descendants(of: pid, in: childrenOf)
-            let appServerCpu = processes[pid]?.cpuPercent ?? 0
-            let hasActiveAppServer = appServerCpu >= codexDesktopOwnerCpuThreshold
             let hasTurnScopedWorker = tree.contains { workerPid in
                 guard workerPid != pid else { return false }
                 return isCodexDesktopAgentWorkerCommand(processes[workerPid]?.command ?? "")
             }
-            if hasActiveAppServer || hasTurnScopedWorker {
+            if hasTurnScopedWorker {
                 owners.insert(.codexDesktop)
             }
         }
