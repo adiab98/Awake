@@ -74,6 +74,9 @@ final class AwakeController: ObservableObject {
         }
     }
     private static let lidGuardKey = "lidGuardEnabledV2"
+    private static let lowPowerManagedKey = "lidLowPowerModeManagedV1"
+    private static let lowPowerOriginalBatteryKey = "lidLowPowerModeOriginalBatteryV1"
+    private static let lowPowerOriginalChargerKey = "lidLowPowerModeOriginalChargerV1"
 
     /// Tracks whether we've offered the one-time install dialog. Set on
     /// dismissal regardless of the user's choice — we never re-pester.
@@ -157,6 +160,7 @@ final class AwakeController: ObservableObject {
     @Published var launchAtLoginError: String?
 
     private let power: PowerManaging
+    private let safety: PowerSafetyMonitoring
     private let agents = AgentMonitor()
     private let lid: LidGuarding
     private let logWatcher = LogActivityWatcher()
@@ -164,7 +168,10 @@ final class AwakeController: ObservableObject {
     private var tickTimer: Timer?
     private var stateRefreshTimer: Timer?
     private var statusNoticeTimer: Timer?
+    private var thermalObserver: NSObjectProtocol?
+    private var powerStateObserver: NSObjectProtocol?
     private var updatingLaunchAtLoginFromSystem = false
+    private var applyingSafetyStop = false
 
     /// Reentrancy guard for any privileged lid action (install, uninstall, fallback
     /// admin prompt). Modal AppleScript dialogs run off the main thread; this flag
@@ -177,10 +184,12 @@ final class AwakeController: ObservableObject {
 
     init(
         power: PowerManaging = PowerManager(),
+        safety: PowerSafetyMonitoring = PowerSafetyMonitor(),
         lid: LidGuarding = LidGuard(),
         startServices: Bool = true
     ) {
         self.power = power
+        self.safety = safety
         self.lid = lid
         self.enabledTools = Self.initialEnabledTools()
         // Seed install status synchronously. The probe is two `sudo -n -l` calls
@@ -196,10 +205,16 @@ final class AwakeController: ObservableObject {
         let stored = UserDefaults.standard.bool(forKey: Self.lidGuardKey)
         let initial = (status == .installed) ? stored : false
         self.lidGuardEnabled = initial
+        #if !APP_STORE
+        if initial, !enableLowPowerModeForLidGuard() {
+            self.lidGuardEnabled = false
+            UserDefaults.standard.set(false, forKey: Self.lidGuardKey)
+        }
+        #endif
         // didSet doesn't fire on the first assignment, so persist explicitly
         // when migration corrected the stored value.
-        if stored != initial {
-            UserDefaults.standard.set(initial, forKey: Self.lidGuardKey)
+        if stored != self.lidGuardEnabled {
+            UserDefaults.standard.set(self.lidGuardEnabled, forKey: Self.lidGuardKey)
         }
         guard startServices else { return }
         startBackgroundServices()
@@ -349,6 +364,16 @@ final class AwakeController: ObservableObject {
 
     var lidPasswordlessReady: Bool { lidInstallStatus == .installed }
 
+    #if !APP_STORE
+    var lidSafetyMessage: String? {
+        guard lidGuardEnabled else { return nil }
+        if isThermallyUnsafe {
+            return "Closed-lid awake is paused because macOS reports high heat."
+        }
+        return nil
+    }
+    #endif
+
     static let closedLidHelpURL = URL(
         string: "https://github.com/adiab98/Awake/blob/main/docs/closed-lid.md"
     )!
@@ -395,6 +420,24 @@ final class AwakeController: ObservableObject {
         }
         RunLoop.main.add(stateTimer, forMode: .common)
         stateRefreshTimer = stateTimer
+
+        thermalObserver = NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleSafetyStateChanged()
+            }
+        }
+
+        powerStateObserver = NotificationCenter.default.addObserver(
+            forName: Notification.Name.NSProcessInfoPowerStateDidChange,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleSafetyStateChanged()
+            }
+        }
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
@@ -444,7 +487,7 @@ final class AwakeController: ObservableObject {
         alert.informativeText = """
         Awake can keep your Mac running with the lid closed, but macOS asks for your admin password every time the toggle changes.
 
-        With a one-time setup, Awake installs a narrow rule at /etc/sudoers.d/awake so it can flip the lid-close override silently from then on. You can revoke access anytime from More.
+        With a one-time setup, Awake installs a narrow rule at /etc/sudoers.d/awake so it can flip the lid-close override and Low Power Mode silently from then on. Awake keeps Low Power Mode on during closed-lid awake, including on battery power, and turns Awake off if macOS reports high heat. You can revoke access anytime from More.
 
         Skip this and you can do it later from More.
         """
@@ -533,6 +576,12 @@ final class AwakeController: ObservableObject {
     func refreshForPresentation() {
         agents.scanNow()
         refreshExternalState()
+        handleSafetyStateChanged()
+    }
+
+    func handleSafetyStateChanged() {
+        objectWillChange.send()
+        sync()
     }
 
     func requestQuit() {
@@ -635,18 +684,100 @@ final class AwakeController: ObservableObject {
     #if !APP_STORE
     // MARK: - Lid guard install / toggle
 
+    private var lowPowerModeManagedByAwake: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.lowPowerManagedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.lowPowerManagedKey) }
+    }
+
+    private var originalLowPowerModeState: LowPowerModeState? {
+        get {
+            let defaults = UserDefaults.standard
+            let battery = Self.optionalBool(
+                from: defaults,
+                forKey: Self.lowPowerOriginalBatteryKey
+            )
+            let charger = Self.optionalBool(
+                from: defaults,
+                forKey: Self.lowPowerOriginalChargerKey
+            )
+            guard battery != nil || charger != nil else { return nil }
+            return LowPowerModeState(batteryPower: battery, chargerPower: charger)
+        }
+        set {
+            let defaults = UserDefaults.standard
+            if let battery = newValue?.batteryPower {
+                defaults.set(battery, forKey: Self.lowPowerOriginalBatteryKey)
+            } else {
+                defaults.removeObject(forKey: Self.lowPowerOriginalBatteryKey)
+            }
+            if let charger = newValue?.chargerPower {
+                defaults.set(charger, forKey: Self.lowPowerOriginalChargerKey)
+            } else {
+                defaults.removeObject(forKey: Self.lowPowerOriginalChargerKey)
+            }
+        }
+    }
+
+    private static func optionalBool(from defaults: UserDefaults, forKey key: String) -> Bool? {
+        guard defaults.object(forKey: key) != nil else { return nil }
+        return defaults.bool(forKey: key)
+    }
+
+    private func enableLowPowerModeForLidGuard() -> Bool {
+        lidSetupError = nil
+        if !lowPowerModeManagedByAwake {
+            guard let current = lid.lowPowerModeState() else {
+                lidSetupError = "Could not read Low Power Mode state."
+                return false
+            }
+            originalLowPowerModeState = current
+            lowPowerModeManagedByAwake = true
+        }
+
+        guard lid.setLowPowerMode(.enabled, allowPrompt: false) else {
+            lowPowerModeManagedByAwake = false
+            originalLowPowerModeState = nil
+            lidInstallStatus = .notInstalled
+            lidSetupError = "Passwordless setup needs to be run again for Low Power Mode."
+            setStatusNotice("Set up passwordless lid sleep again.")
+            return false
+        }
+
+        return true
+    }
+
+    private func restoreLowPowerModeForLidGuard() {
+        guard lowPowerModeManagedByAwake else { return }
+        guard let original = originalLowPowerModeState else {
+            lowPowerModeManagedByAwake = false
+            return
+        }
+
+        guard lid.setLowPowerMode(original, allowPrompt: false) else {
+            lidSetupError = "Could not restore the previous Low Power Mode state."
+            setStatusNotice("Restore Low Power Mode in System Settings.")
+            return
+        }
+
+        originalLowPowerModeState = nil
+        lowPowerModeManagedByAwake = false
+    }
+
     /// User flipped the "Stay awake with lid closed" toggle. If passwordless setup
     /// hasn't been done yet, runs the one-time install first; on cancel/failure the
     /// toggle stays OFF and an error is surfaced.
     func userToggleLidGuard(on: Bool) {
         if on {
             if lidInstallStatus == .installed {
-                lidGuardEnabled = true
+                if enableLowPowerModeForLidGuard() {
+                    lidGuardEnabled = true
+                }
                 return
             }
             beginLidInstall(thenEnable: true)
         } else {
             lidGuardEnabled = false
+            restoreLowPowerModeForLidGuard()
         }
     }
 
@@ -664,6 +795,7 @@ final class AwakeController: ObservableObject {
         lidActionInFlight = true
         lidSetupError = nil
         if lidGuardEnabled { lidGuardEnabled = false }
+        restoreLowPowerModeForLidGuard()
         let lidRef = lid
         DispatchQueue.global(qos: .userInitiated).async {
             // Try to release the override first if it's currently active.
@@ -709,7 +841,11 @@ final class AwakeController: ObservableObject {
                 switch result {
                 case .success:
                     if status == .installed {
-                        if thenEnable { self.lidGuardEnabled = true }
+                        if thenEnable {
+                            if self.enableLowPowerModeForLidGuard() {
+                                self.lidGuardEnabled = true
+                            }
+                        }
                         self.setStatusNotice("Passwordless lid sleep ready.")
                     } else {
                         self.lidGuardEnabled = false
@@ -749,15 +885,24 @@ final class AwakeController: ObservableObject {
     // MARK: - Sync power state
 
     private func sync() {
+        guard !applyingSafetyStop else { return }
+        if isThermallyUnsafe, isCaffeinated {
+            applyThermalSafetyStop()
+            return
+        }
+        #if !APP_STORE
+        if shouldReleaseLidGuardForSafety {
+            maybeReleaseLidGuardForSafety(
+                successNotice: lidSafetyMessage ?? "Closed-lid awake paused for safety."
+            )
+        }
+        #endif
+
         if isCaffeinated {
             let ok = power.assert(preventDisplaySleep: preventDisplaySleep)
             powerAssertionError = ok ? nil : power.lastError
             #if !APP_STORE
-            if lidGuardEnabled {
-                maybeEngageLidGuard()
-            } else {
-                maybeAutoReleaseLidGuard()
-            }
+            syncLidGuardForCurrentSafety()
             #endif
         } else {
             let ok = power.release()
@@ -796,6 +941,7 @@ final class AwakeController: ObservableObject {
                     self.lidGuardEnabled = false
                     self.lidSetupError = "Passwordless lid setup needs to be run again."
                 }
+                self.sync()
             }
         }
     }
@@ -831,12 +977,76 @@ final class AwakeController: ObservableObject {
         statusNoticeTimer = timer
     }
 
+    private var isThermallyUnsafe: Bool {
+        switch safety.thermalState {
+        case .serious, .critical:
+            return true
+        case .nominal, .fair:
+            return false
+        @unknown default:
+            return false
+        }
+    }
+
+    private func applyThermalSafetyStop() {
+        guard !applyingSafetyStop else { return }
+        applyingSafetyStop = true
+        manualActive = false
+        manualEndDate = nil
+        endTimer?.invalidate()
+        endTimer = nil
+        if waitForAgents { waitForAgents = false }
+        let ok = power.release()
+        powerAssertionError = ok ? nil : power.lastError
+        #if !APP_STORE
+        maybeReleaseLidGuardForSafety(
+            successNotice: "Awake turned off because macOS reported high heat."
+        )
+        #endif
+        setStatusNotice("Awake turned off because macOS reported high heat.")
+        applyingSafetyStop = false
+    }
+
     #if !APP_STORE
+    private var canEngageLidGuardNow: Bool {
+        !isThermallyUnsafe
+    }
+
+    private var shouldReleaseLidGuardForSafety: Bool {
+        disablesleepActive && !canEngageLidGuardNow
+    }
+
+    private func syncLidGuardForCurrentSafety() {
+        guard lidGuardEnabled else {
+            maybeAutoReleaseLidGuard()
+            return
+        }
+        guard canEngageLidGuardNow else {
+            maybeReleaseLidGuardForSafety(
+                successNotice: lidSafetyMessage ?? "Closed-lid awake paused for safety."
+            )
+            return
+        }
+        maybeEngageLidGuard()
+    }
+
     /// Auto-release the pmset override when nothing is keeping the Mac awake AND we
     /// were the ones who engaged it. Strictly silent — bails if sudoers isn't
     /// installed. The user can manually restore via the Restore Lid Sleep button.
     private func maybeAutoReleaseLidGuard() {
-        guard disablesleepActive, weEngagedLidGuard, !lidActionInFlight else { return }
+        releaseLidGuardSilently(successNotice: nil, includeExternalOverride: false)
+    }
+
+    private func maybeReleaseLidGuardForSafety(successNotice: String) {
+        releaseLidGuardSilently(successNotice: successNotice, includeExternalOverride: true)
+    }
+
+    private func releaseLidGuardSilently(
+        successNotice: String?,
+        includeExternalOverride: Bool
+    ) {
+        guard disablesleepActive, !lidActionInFlight else { return }
+        guard includeExternalOverride || weEngagedLidGuard else { return }
         guard lidInstallStatus == .installed else { return }
 
         lidActionInFlight = true
@@ -850,6 +1060,9 @@ final class AwakeController: ObservableObject {
                 if ok {
                     self.disablesleepActive = false
                     self.weEngagedLidGuard = false
+                    if let successNotice {
+                        self.setStatusNotice(successNotice)
+                    }
                 } else {
                     self.disablesleepActive = current
                     self.lidInstallStatus = .notInstalled
@@ -885,6 +1098,11 @@ final class AwakeController: ObservableObject {
                 if ok {
                     self.disablesleepActive = true
                     self.weEngagedLidGuard = true
+                    if !self.canEngageLidGuardNow {
+                        self.maybeReleaseLidGuardForSafety(
+                            successNotice: self.lidSafetyMessage ?? "Closed-lid awake paused for safety."
+                        )
+                    }
                 } else {
                     self.disablesleepActive = lidRef.currentlyDisabled()
                     self.weEngagedLidGuard = false
@@ -905,6 +1123,7 @@ final class AwakeController: ObservableObject {
         if lidGuardEnabled {
             lidGuardEnabled = false
         }
+        restoreLowPowerModeForLidGuard()
         let lidRef = lid
         DispatchQueue.global(qos: .userInitiated).async {
             let currentlyDisabled = lidRef.currentlyDisabled()

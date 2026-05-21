@@ -191,6 +191,16 @@ struct MenuView: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                } else if let lidSafetyMessage = controller.lidSafetyMessage {
+                    Text(lidSafetyMessage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if controller.lidGuardEnabled {
+                    Text("Low Power Mode is kept on until this is turned off.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 #endif
                 MenuToggle(title: "Keep display awake",

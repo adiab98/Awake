@@ -16,16 +16,24 @@ The direct-download edition can install a narrow administrator-approved rule at:
 /etc/sudoers.d/awake
 ```
 
-That rule allows only these two exact commands:
+That rule allows only these exact commands:
 
 ```text
 /usr/bin/pmset -a disablesleep 0
 /usr/bin/pmset -a disablesleep 1
+/usr/bin/pmset -b lowpowermode 0
+/usr/bin/pmset -b lowpowermode 1
+/usr/bin/pmset -c lowpowermode 0
+/usr/bin/pmset -c lowpowermode 1
 ```
 
 Awake uses those commands to turn the lid-close sleep override on while an Awake
-session is active, then restore normal lid sleep when the session ends. The
-rule does not grant a shell, wildcard command access, or broad root access.
+session is active on battery or charger power, then restore normal lid sleep
+when the session ends. If macOS reports serious thermal pressure, Awake backs
+off and restores normal lid sleep. Awake also turns Low Power Mode on while
+closed-lid support is enabled, then restores the previous Low Power Mode state
+when closed-lid support is disabled.
+The rule does not grant a shell, wildcard command access, or broad root access.
 
 ## Install Path
 

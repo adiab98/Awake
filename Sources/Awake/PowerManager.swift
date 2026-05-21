@@ -1,4 +1,5 @@
 import Foundation
+import IOKit.ps
 import IOKit.pwr_mgt
 
 protocol PowerManaging: AnyObject {
@@ -7,6 +8,26 @@ protocol PowerManaging: AnyObject {
     func assert(preventDisplaySleep: Bool) -> Bool
     @discardableResult
     func release() -> Bool
+}
+
+protocol PowerSafetyMonitoring: AnyObject {
+    var isExternalPowerConnected: Bool { get }
+    var thermalState: ProcessInfo.ThermalState { get }
+}
+
+final class PowerSafetyMonitor: PowerSafetyMonitoring {
+    var isExternalPowerConnected: Bool {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let source = IOPSGetProvidingPowerSourceType(info)?
+                .takeRetainedValue() as? String else {
+            return false
+        }
+        return source == kIOPSACPowerValue
+    }
+
+    var thermalState: ProcessInfo.ThermalState {
+        ProcessInfo.processInfo.thermalState
+    }
 }
 
 final class PowerManager: PowerManaging {

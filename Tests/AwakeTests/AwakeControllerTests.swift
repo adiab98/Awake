@@ -12,7 +12,8 @@ final class AwakeControllerTests: XCTestCase {
         for key in [
             "waitForAgents", "lidGuardEnabledV2", "preventDisplaySleep",
             "lastTimerMinutes", "hasOfferedLidSetup", "enabledAgentTools",
-            "didMigrateDesktopAgentToolsV1"
+            "didMigrateDesktopAgentToolsV1", "lidLowPowerModeManagedV1",
+            "lidLowPowerModeOriginalBatteryV1", "lidLowPowerModeOriginalChargerV1"
         ] {
             defaults.removeObject(forKey: key)
         }
@@ -198,6 +199,56 @@ final class AwakeControllerTests: XCTestCase {
         XCTAssertTrue(controller.lidGuardEnabled)
     }
 
+    func testLidGuardToggleEnablesLowPowerAndRestoresPreviousState() {
+        let lid = MockLidGuard(
+            status: .installed,
+            lowPowerModeState: LowPowerModeState(batteryPower: false, chargerPower: false)
+        )
+        let controller = AwakeController(power: MockPowerManager(), lid: lid, startServices: false)
+
+        controller.userToggleLidGuard(on: true)
+        XCTAssertTrue(controller.lidGuardEnabled)
+        XCTAssertEqual(lid.setLowPowerModeCalls, 1)
+        XCTAssertEqual(lid.lastLowPowerModeState, .enabled)
+
+        controller.userToggleLidGuard(on: false)
+        XCTAssertFalse(controller.lidGuardEnabled)
+        XCTAssertEqual(lid.setLowPowerModeCalls, 2)
+        XCTAssertEqual(
+            lid.lastLowPowerModeState,
+            LowPowerModeState(batteryPower: false, chargerPower: false)
+        )
+    }
+
+    func testLidGuardToggleLeavesLowPowerOnWhenItWasAlreadyOn() {
+        let original = LowPowerModeState(batteryPower: true, chargerPower: true)
+        let lid = MockLidGuard(status: .installed, lowPowerModeState: original)
+        let controller = AwakeController(power: MockPowerManager(), lid: lid, startServices: false)
+
+        controller.userToggleLidGuard(on: true)
+        controller.userToggleLidGuard(on: false)
+
+        XCTAssertEqual(lid.lastLowPowerModeState, original)
+    }
+
+    func testLowPowerFailurePreventsLidGuardEnable() {
+        let lid = MockLidGuard(
+            status: .installed,
+            lowPowerModeState: LowPowerModeState(batteryPower: false, chargerPower: false)
+        )
+        lid.setLowPowerModeResult = false
+        let controller = AwakeController(power: MockPowerManager(), lid: lid, startServices: false)
+
+        controller.userToggleLidGuard(on: true)
+
+        XCTAssertFalse(controller.lidGuardEnabled)
+        XCTAssertEqual(controller.lidInstallStatus, .notInstalled)
+        XCTAssertEqual(
+            controller.lidSetupError,
+            "Passwordless setup needs to be run again for Low Power Mode."
+        )
+    }
+
     func testInstallCancellationLeavesToggleOff() async throws {
         let lid = MockLidGuard(status: .notInstalled)
         lid.installResult = .failure(.userCancelled)
@@ -226,12 +277,18 @@ final class AwakeControllerTests: XCTestCase {
 
     func testStaleLidGuardEnabledIsKeptWhenSudoersInstalled() {
         UserDefaults.standard.set(true, forKey: "lidGuardEnabledV2")
+        let lid = MockLidGuard(
+            status: .installed,
+            lowPowerModeState: LowPowerModeState(batteryPower: false, chargerPower: false)
+        )
         let controller = AwakeController(
             power: MockPowerManager(),
-            lid: MockLidGuard(status: .installed),
+            lid: lid,
             startServices: false
         )
         XCTAssertTrue(controller.lidGuardEnabled)
+        XCTAssertEqual(lid.setLowPowerModeCalls, 1)
+        XCTAssertEqual(lid.lastLowPowerModeState, .enabled)
     }
 
     func testCaffeinatingDoesNotEngageLidWhenSudoersMissing() async throws {
@@ -254,7 +311,12 @@ final class AwakeControllerTests: XCTestCase {
     func testFailedSilentLidEngageResetsPasswordlessSetupState() async throws {
         let lid = MockLidGuard(status: .installed)
         lid.setDisabledResult = false
-        let controller = AwakeController(power: MockPowerManager(), lid: lid, startServices: false)
+        let controller = AwakeController(
+            power: MockPowerManager(),
+            safety: MockPowerSafetyMonitor(),
+            lid: lid,
+            startServices: false
+        )
         controller.userToggleLidGuard(on: true)
         XCTAssertTrue(controller.lidGuardEnabled)
 
@@ -265,6 +327,119 @@ final class AwakeControllerTests: XCTestCase {
         XCTAssertFalse(controller.lidGuardEnabled)
         XCTAssertEqual(controller.lidInstallStatus, .notInstalled)
         XCTAssertEqual(controller.lidSetupError, "Passwordless lid setup needs to be run again.")
+    }
+
+    func testLidGuardEngagesOnBatteryPowerWithLowPowerMode() async throws {
+        let lid = MockLidGuard(status: .installed)
+        let safety = MockPowerSafetyMonitor(isExternalPowerConnected: false)
+        let controller = AwakeController(
+            power: MockPowerManager(),
+            safety: safety,
+            lid: lid,
+            startServices: false
+        )
+        controller.userToggleLidGuard(on: true)
+
+        controller.startManual()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertTrue(controller.lidGuardEnabled)
+        XCTAssertTrue(controller.disablesleepActive)
+        XCTAssertEqual(lid.setDisabledCalls, 1)
+        XCTAssertEqual(lid.lastSetValue, true)
+        XCTAssertEqual(lid.setLowPowerModeCalls, 1)
+        XCTAssertEqual(lid.lastLowPowerModeState, .enabled)
+        XCTAssertNil(controller.lidSafetyMessage)
+    }
+
+    func testUnpluggingPowerKeepsLidGuardActive() async throws {
+        let lid = MockLidGuard(status: .installed)
+        let safety = MockPowerSafetyMonitor()
+        let controller = AwakeController(
+            power: MockPowerManager(),
+            safety: safety,
+            lid: lid,
+            startServices: false
+        )
+        controller.userToggleLidGuard(on: true)
+        controller.startManual()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(controller.disablesleepActive)
+
+        safety.isExternalPowerConnected = false
+        controller.handleSafetyStateChanged()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertTrue(controller.disablesleepActive)
+        XCTAssertEqual(lid.setDisabledCalls, 1)
+        XCTAssertEqual(lid.lastSetValue, true)
+        XCTAssertNil(controller.lidSafetyMessage)
+    }
+
+    func testBatteryPowerDoesNotReleaseExistingLidOverride() async throws {
+        let lid = MockLidGuard(currentlyDisabled: true, status: .installed)
+        let safety = MockPowerSafetyMonitor(isExternalPowerConnected: false)
+        let controller = AwakeController(
+            power: MockPowerManager(),
+            safety: safety,
+            lid: lid,
+            startServices: false
+        )
+        controller.userToggleLidGuard(on: true)
+
+        controller.refreshForPresentation()
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        XCTAssertTrue(controller.disablesleepActive)
+        XCTAssertEqual(lid.setDisabledCalls, 0)
+    }
+
+    func testThermalPressureReleasesStaleLidOverrideEvenWhenPreferenceIsOff() async throws {
+        let lid = MockLidGuard(currentlyDisabled: true, status: .installed)
+        let safety = MockPowerSafetyMonitor(thermalState: .serious)
+        let controller = AwakeController(
+            power: MockPowerManager(),
+            safety: safety,
+            lid: lid,
+            startServices: false
+        )
+
+        controller.refreshForPresentation()
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        XCTAssertFalse(controller.lidGuardEnabled)
+        XCTAssertFalse(controller.disablesleepActive)
+        XCTAssertEqual(lid.setDisabledCalls, 1)
+        XCTAssertEqual(lid.lastSetValue, false)
+    }
+
+    func testThermalPressureStopsAwakeAndRestoresLidSleep() async throws {
+        let power = MockPowerManager()
+        let lid = MockLidGuard(status: .installed)
+        let safety = MockPowerSafetyMonitor()
+        let controller = AwakeController(
+            power: power,
+            safety: safety,
+            lid: lid,
+            startServices: false
+        )
+        controller.userToggleLidGuard(on: true)
+        controller.startManual()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        power.reset()
+        XCTAssertTrue(controller.isCaffeinated)
+        XCTAssertTrue(controller.disablesleepActive)
+
+        safety.thermalState = .serious
+        controller.handleSafetyStateChanged()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertFalse(controller.manualActive)
+        XCTAssertFalse(controller.isCaffeinated)
+        XCTAssertFalse(controller.disablesleepActive)
+        XCTAssertEqual(power.releaseCount, 1)
+        XCTAssertEqual(lid.lastSetValue, false)
+        XCTAssertEqual(controller.statusNotice, "Awake turned off because macOS reported high heat.")
     }
 
     func testRevokeUninstallsAndDisablesPreference() async throws {
@@ -306,28 +481,55 @@ private final class MockPowerManager: PowerManaging {
     }
 }
 
+private final class MockPowerSafetyMonitor: PowerSafetyMonitoring {
+    var isExternalPowerConnected: Bool
+    var thermalState: ProcessInfo.ThermalState
+
+    init(
+        isExternalPowerConnected: Bool = true,
+        thermalState: ProcessInfo.ThermalState = .nominal
+    ) {
+        self.isExternalPowerConnected = isExternalPowerConnected
+        self.thermalState = thermalState
+    }
+}
+
 private final class MockLidGuard: LidGuarding, @unchecked Sendable {
     private let lock = NSLock()
     private var disabled: Bool
     private var status: LidInstallStatus
+    private var lowPowerMode: LowPowerModeState?
     var statusAfterInstall: LidInstallStatus?
     var statusAfterUninstall: LidInstallStatus?
     var installResult: Result<Void, LidActionError> = .success(())
     var uninstallResult: Result<Void, LidActionError> = .success(())
     var setDisabledResult = true
+    var setLowPowerModeResult = true
     private(set) var setDisabledCalls = 0
+    private(set) var setLowPowerModeCalls = 0
     private(set) var installCalls = 0
     private(set) var uninstallCalls = 0
     private(set) var lastSetValue: Bool?
+    private(set) var lastLowPowerModeState: LowPowerModeState?
 
-    init(currentlyDisabled: Bool = false, status: LidInstallStatus = .installed) {
+    init(
+        currentlyDisabled: Bool = false,
+        status: LidInstallStatus = .installed,
+        lowPowerModeState: LowPowerModeState? = .enabled
+    ) {
         self.disabled = currentlyDisabled
         self.status = status
+        self.lowPowerMode = lowPowerModeState
     }
 
     func currentlyDisabled() -> Bool {
         lock.lock(); defer { lock.unlock() }
         return disabled
+    }
+
+    func lowPowerModeState() -> LowPowerModeState? {
+        lock.lock(); defer { lock.unlock() }
+        return lowPowerMode
     }
 
     func installationStatus() -> LidInstallStatus {
@@ -366,5 +568,16 @@ private final class MockLidGuard: LidGuarding, @unchecked Sendable {
         }
         lock.unlock()
         return setDisabledResult
+    }
+
+    func setLowPowerMode(_ state: LowPowerModeState, allowPrompt: Bool) -> Bool {
+        lock.lock()
+        setLowPowerModeCalls += 1
+        lastLowPowerModeState = state
+        if setLowPowerModeResult {
+            lowPowerMode = state
+        }
+        lock.unlock()
+        return setLowPowerModeResult
     }
 }

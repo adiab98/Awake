@@ -13,7 +13,10 @@ agents and long-running tasks are active.
 
 The Mac App Store version uses public macOS power assertions and does not include
 closed-lid support directly. Closed-lid support is available only through a
-separate direct-download edition:
+separate direct-download edition. That edition can use the lid-close override on
+battery or charger power while an Awake session is active, keeps Low Power Mode
+on during closed-lid support, and restores normal lid sleep on high heat. It
+restores the previous Low Power Mode state when you turn closed-lid support off:
 
 https://github.com/adiab98/Awake/blob/main/docs/closed-lid.md
 

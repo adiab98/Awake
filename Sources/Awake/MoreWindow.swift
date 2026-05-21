@@ -81,7 +81,7 @@ private struct MoreView: View {
                 .padding(.horizontal, 28)
                 .padding(.top, 6)
             #else
-            Text("Keeps your Mac awake while AI agents finish their turn, even with the lid closed.")
+            Text("Keeps your Mac awake while AI agents finish their turn, with guarded closed-lid support.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -218,14 +218,21 @@ private struct MoreView: View {
                     .foregroundStyle(.tertiary)
 
                 if controller.lidPasswordlessReady {
-                    Text("Awake can toggle lid-close sleep silently — no password prompt. Revoking removes the rule.")
+                    Text("Awake can toggle lid-close sleep and Low Power Mode silently. Low Power Mode is restored to its previous state when closed-lid support is turned off.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    Text("Set up once with your password and Awake will toggle lid-close sleep silently from then on. Until you do, the lid toggle in the menu will prompt for setup on first use.")
+                    Text("Set up once with your password and Awake will toggle lid-close sleep and Low Power Mode silently from then on. The lid override works on battery or charger power, with Low Power Mode kept on, and stops on high heat.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let lidSafetyMessage = controller.lidSafetyMessage {
+                    Text(lidSafetyMessage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 

@@ -53,6 +53,10 @@ final class LidGuardTests: XCTestCase {
         let body = LidGuard.sudoersContent(forUser: "alice")
         XCTAssertTrue(body.contains("alice ALL=(root:wheel) NOPASSWD: \(LidGuard.pmsetPath) -a disablesleep 0"))
         XCTAssertTrue(body.contains("alice ALL=(root:wheel) NOPASSWD: \(LidGuard.pmsetPath) -a disablesleep 1"))
+        XCTAssertTrue(body.contains("alice ALL=(root:wheel) NOPASSWD: \(LidGuard.pmsetPath) -b lowpowermode 0"))
+        XCTAssertTrue(body.contains("alice ALL=(root:wheel) NOPASSWD: \(LidGuard.pmsetPath) -b lowpowermode 1"))
+        XCTAssertTrue(body.contains("alice ALL=(root:wheel) NOPASSWD: \(LidGuard.pmsetPath) -c lowpowermode 0"))
+        XCTAssertTrue(body.contains("alice ALL=(root:wheel) NOPASSWD: \(LidGuard.pmsetPath) -c lowpowermode 1"))
     }
 
     func testSudoersContentEndsWithNewlineSoVisudoIsHappy() {
@@ -68,12 +72,12 @@ final class LidGuardTests: XCTestCase {
         )
     }
 
-    func testSudoersContentGrantsExactlyTwoCommands() {
+    func testSudoersContentGrantsOnlyExactCommands() {
         let body = LidGuard.sudoersContent(forUser: "alice")
         let nopasswdLines = body
             .split(separator: "\n", omittingEmptySubsequences: true)
             .filter { $0.contains("NOPASSWD:") }
-        XCTAssertEqual(nopasswdLines.count, 2, "Rule must grant exactly two commands")
+        XCTAssertEqual(nopasswdLines.count, 6, "Rule must grant only the expected commands")
         for line in nopasswdLines {
             XCTAssertTrue(line.contains(LidGuard.pmsetPath))
             XCTAssertFalse(line.contains("*"), "No wildcards allowed in granted commands")
@@ -89,6 +93,10 @@ final class LidGuardTests: XCTestCase {
             (ALL) ALL
             (root : wheel) NOPASSWD: /usr/bin/pmset -a disablesleep 0
             (root : wheel) NOPASSWD: /usr/bin/pmset -a disablesleep 1
+            (root : wheel) NOPASSWD: /usr/bin/pmset -b lowpowermode 0
+            (root : wheel) NOPASSWD: /usr/bin/pmset -b lowpowermode 1
+            (root : wheel) NOPASSWD: /usr/bin/pmset -c lowpowermode 0
+            (root : wheel) NOPASSWD: /usr/bin/pmset -c lowpowermode 1
         """
 
         XCTAssertTrue(LidGuard.sudoListShowsPasswordlessPmsetCommands(listing))
@@ -107,9 +115,44 @@ final class LidGuardTests: XCTestCase {
         let listing = """
         User alice may run the following commands on Mac:
             (root : wheel) NOPASSWD: /usr/bin/pmset -a disablesleep 0
+            (root : wheel) NOPASSWD: /usr/bin/pmset -a disablesleep 1
         """
 
         XCTAssertFalse(LidGuard.sudoListShowsPasswordlessPmsetCommands(listing))
+    }
+
+    func testParseLowPowerModeStateReadsBatteryAndChargerValues() {
+        let output = """
+        Battery Power:
+         Sleep On Power Button 1
+         lowpowermode         0
+        AC Power:
+         Sleep On Power Button 1
+         lowpowermode         1
+        """
+
+        XCTAssertEqual(
+            LidGuard.parseLowPowerModeState(output),
+            LowPowerModeState(batteryPower: false, chargerPower: true)
+        )
+    }
+
+    func testLowPowerModeCommandsRestoreKnownProfilesOnly() {
+        XCTAssertEqual(
+            LidGuard.lowPowerModeCommands(
+                for: LowPowerModeState(batteryPower: false, chargerPower: true)
+            ),
+            [
+                ["-b", "lowpowermode", "0"],
+                ["-c", "lowpowermode", "1"],
+            ]
+        )
+        XCTAssertEqual(
+            LidGuard.lowPowerModeCommands(
+                for: LowPowerModeState(batteryPower: nil, chargerPower: false)
+            ),
+            [["-c", "lowpowermode", "0"]]
+        )
     }
 
     /// Pipes the generated body through `visudo -c -f -` to confirm it parses.

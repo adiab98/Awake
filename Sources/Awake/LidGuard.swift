@@ -12,8 +12,16 @@ enum LidActionError: Error, Equatable {
     case privilegedShellFailed(code: Int, message: String)
 }
 
+struct LowPowerModeState: Equatable, Sendable {
+    var batteryPower: Bool?
+    var chargerPower: Bool?
+
+    static let enabled = LowPowerModeState(batteryPower: true, chargerPower: true)
+}
+
 protocol LidGuarding: AnyObject, Sendable {
     func currentlyDisabled() -> Bool
+    func lowPowerModeState() -> LowPowerModeState?
     func installationStatus() -> LidInstallStatus
     func install() -> Result<Void, LidActionError>
     func uninstall() -> Result<Void, LidActionError>
@@ -22,6 +30,8 @@ protocol LidGuarding: AnyObject, Sendable {
     /// `false` so they never surprise the user with a prompt.
     @discardableResult
     func setDisabled(_ disabled: Bool, allowPrompt: Bool) -> Bool
+    @discardableResult
+    func setLowPowerMode(_ state: LowPowerModeState, allowPrompt: Bool) -> Bool
 }
 
 #if APP_STORE
@@ -30,6 +40,7 @@ protocol LidGuarding: AnyObject, Sendable {
 /// no-op so the App Store binary contains no sudo/pmset/sudoers workflow.
 final class LidGuard: LidGuarding, @unchecked Sendable {
     func currentlyDisabled() -> Bool { false }
+    func lowPowerModeState() -> LowPowerModeState? { nil }
     func installationStatus() -> LidInstallStatus { .notInstalled }
 
     func install() -> Result<Void, LidActionError> {
@@ -43,15 +54,21 @@ final class LidGuard: LidGuarding, @unchecked Sendable {
 
     @discardableResult
     func setDisabled(_ disabled: Bool, allowPrompt: Bool = false) -> Bool { false }
+    @discardableResult
+    func setLowPowerMode(_ state: LowPowerModeState, allowPrompt: Bool = false) -> Bool { false }
 }
 #else
 /// Manages `pmset -a disablesleep` (the lid-close sleep override) by installing a
 /// narrowly-scoped sudoers rule on first use. After install, the toggle runs
 /// `sudo -n /usr/bin/pmset -a disablesleep 0|1` with no password prompt.
 ///
-/// The rule allows ONLY two exact commands:
+/// The rule allows ONLY six exact commands:
 ///   * `/usr/bin/pmset -a disablesleep 0`
 ///   * `/usr/bin/pmset -a disablesleep 1`
+///   * `/usr/bin/pmset -b lowpowermode 0`
+///   * `/usr/bin/pmset -b lowpowermode 1`
+///   * `/usr/bin/pmset -c lowpowermode 0`
+///   * `/usr/bin/pmset -c lowpowermode 1`
 /// No wildcards, no shell, no environment forwarding. The user can revoke at any
 /// time via the "Revoke" button in Awake's More window, which deletes the
 /// sudoers file.
@@ -74,6 +91,11 @@ final class LidGuard: LidGuarding, @unchecked Sendable {
             }
         }
         return false
+    }
+
+    func lowPowerModeState() -> LowPowerModeState? {
+        guard let out = runRead(Self.pmsetPath, ["-g", "custom"]) else { return nil }
+        return Self.parseLowPowerModeState(out)
     }
 
     /// Detects whether the current user can run the protected pmset commands
@@ -165,6 +187,35 @@ final class LidGuard: LidGuarding, @unchecked Sendable {
         }
     }
 
+    @discardableResult
+    func setLowPowerMode(_ state: LowPowerModeState, allowPrompt: Bool = false) -> Bool {
+        let commands = Self.lowPowerModeCommands(for: state)
+        guard !commands.isEmpty else { return true }
+
+        var allSilent = true
+        for args in commands {
+            let sudoArgs = ["-n", Self.pmsetPath] + args
+            if runQuiet(Self.sudoPath, sudoArgs) != 0 {
+                allSilent = false
+                break
+            }
+        }
+        if allSilent { return true }
+
+        guard allowPrompt else { return false }
+
+        let shell = commands
+            .map { ([Self.pmsetPath] + $0).joined(separator: " ") }
+            .joined(separator: " && ")
+        switch runPrivileged(
+            shell: shell,
+            prompt: "Awake needs your password to manage Low Power Mode for closed-lid awake."
+        ) {
+        case .success: return true
+        case .failure: return false
+        }
+    }
+
     // MARK: - Helpers (internal for unit testing)
 
     /// Builds the sudoers file body. Comments are ASCII-only to avoid any chance
@@ -175,10 +226,14 @@ final class LidGuard: LidGuarding, @unchecked Sendable {
     static func sudoersContent(forUser user: String) -> String {
         return """
         # Awake.app - narrow rule allowing the user to toggle the lid-close sleep
-        # override (pmset disablesleep) without a password prompt. Remove this file
+        # override and Low Power Mode without a password prompt. Remove this file
         # (or use the Revoke button in Awake > More) to revert.
         \(user) ALL=(root:wheel) NOPASSWD: \(pmsetPath) -a disablesleep 0
         \(user) ALL=(root:wheel) NOPASSWD: \(pmsetPath) -a disablesleep 1
+        \(user) ALL=(root:wheel) NOPASSWD: \(pmsetPath) -b lowpowermode 0
+        \(user) ALL=(root:wheel) NOPASSWD: \(pmsetPath) -b lowpowermode 1
+        \(user) ALL=(root:wheel) NOPASSWD: \(pmsetPath) -c lowpowermode 0
+        \(user) ALL=(root:wheel) NOPASSWD: \(pmsetPath) -c lowpowermode 1
 
         """
     }
@@ -202,8 +257,7 @@ final class LidGuard: LidGuarding, @unchecked Sendable {
     }
 
     static func sudoListShowsPasswordlessPmsetCommands(_ listing: String) -> Bool {
-        func hasRule(for value: String) -> Bool {
-            let expected = "\(pmsetPath) -a disablesleep \(value)"
+        func hasRule(for expected: String) -> Bool {
             return listing.split(separator: "\n").contains { rawLine in
                 let normalized = rawLine
                     .split(whereSeparator: { $0 == " " || $0 == "\t" })
@@ -220,7 +274,61 @@ final class LidGuard: LidGuarding, @unchecked Sendable {
             }
         }
 
-        return hasRule(for: "0") && hasRule(for: "1")
+        let required = [
+            "\(pmsetPath) -a disablesleep 0",
+            "\(pmsetPath) -a disablesleep 1",
+            "\(pmsetPath) -b lowpowermode 0",
+            "\(pmsetPath) -b lowpowermode 1",
+            "\(pmsetPath) -c lowpowermode 0",
+            "\(pmsetPath) -c lowpowermode 1",
+        ]
+        return required.allSatisfy(hasRule)
+    }
+
+    static func parseLowPowerModeState(_ output: String) -> LowPowerModeState {
+        var section: String?
+        var state = LowPowerModeState()
+
+        for raw in output.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            switch line {
+            case "Battery Power:":
+                section = "battery"
+                continue
+            case "AC Power:":
+                section = "charger"
+                continue
+            default:
+                break
+            }
+
+            let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            guard parts.count >= 2, parts[0].lowercased() == "lowpowermode" else {
+                continue
+            }
+            let enabled = parts[1] == "1"
+            switch section {
+            case "battery":
+                state.batteryPower = enabled
+            case "charger":
+                state.chargerPower = enabled
+            default:
+                break
+            }
+        }
+
+        return state
+    }
+
+    static func lowPowerModeCommands(for state: LowPowerModeState) -> [[String]] {
+        var commands: [[String]] = []
+        if let battery = state.batteryPower {
+            commands.append(["-b", "lowpowermode", battery ? "1" : "0"])
+        }
+        if let charger = state.chargerPower {
+            commands.append(["-c", "lowpowermode", charger ? "1" : "0"])
+        }
+        return commands
     }
 
     private func runPrivileged(shell: String, prompt: String) -> Result<Void, LidActionError> {

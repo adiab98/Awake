@@ -2,7 +2,8 @@
 
 A tiny macOS menu-bar app that keeps your Mac awake while AI coding agents
 finish their turn — Claude Code, Claude Desktop, Codex CLI, Codex Desktop,
-Cursor, and OpenCode. Optionally keeps it running with the lid closed.
+Cursor, and OpenCode. Optionally keeps it running with guarded closed-lid
+support.
 
 <p align="center">
   <img src="docs/screenshot.png" alt="Awake menu bar popover" width="420">
@@ -31,7 +32,9 @@ It lives in the menu bar; there is no Dock icon.
   after.
 - **Manual caffeinate** with optional timer, 1 minute to 12 hours, or custom.
 - **Keep display awake** — also blocks display sleep, not just system sleep.
-- **Stay awake with lid closed** — toggles `pmset -a disablesleep`. See below.
+- **Stay awake with lid closed** — toggles `pmset -a disablesleep` while an
+  Awake session is active, keeps Low Power Mode on for battery and charger
+  power, and backs off on high heat. See below.
 - **Launch at login** — opt-in from the More window.
 
 ## Lid-close sleep and the one-time password
@@ -41,19 +44,32 @@ disablesleep`), which macOS protects with admin authorization. Out of the box,
 that means a password prompt every single time the toggle flips.
 
 Awake offers a one-time setup: with your permission, it installs a narrowly
-scoped sudoers rule at `/etc/sudoers.d/awake` that lets your user run exactly
-two commands without a password:
+scoped sudoers rule at `/etc/sudoers.d/awake` that lets your user run only
+these exact commands without a password:
 
 ```
 <your-user> ALL=(root:wheel) NOPASSWD: /usr/bin/pmset -a disablesleep 0
 <your-user> ALL=(root:wheel) NOPASSWD: /usr/bin/pmset -a disablesleep 1
+<your-user> ALL=(root:wheel) NOPASSWD: /usr/bin/pmset -b lowpowermode 0
+<your-user> ALL=(root:wheel) NOPASSWD: /usr/bin/pmset -b lowpowermode 1
+<your-user> ALL=(root:wheel) NOPASSWD: /usr/bin/pmset -c lowpowermode 0
+<your-user> ALL=(root:wheel) NOPASSWD: /usr/bin/pmset -c lowpowermode 1
 ```
 
 No wildcards. No shell. No environment forwarding. The file is validated with
 `visudo -c` before it is moved into place, so a botched install can never
 break your existing sudo configuration.
 
-After that, the toggle is silent — no password prompts, ever.
+After that, the toggle is silent — no password prompts, ever. Awake can use the
+lid-close override on battery or charger power while an Awake session is active.
+If macOS reports serious thermal pressure, Awake turns off and restores normal
+lid sleep.
+
+Awake also enables Low Power Mode while closed-lid support is turned on. It
+remembers the previous Low Power Mode setting and restores that state when you
+turn closed-lid support off. If Low Power Mode was already on, Awake leaves it
+on. This battery-safe mode is what lets closed-lid awake continue away from the
+charger without running at full power.
 
 You can revoke at any time from **Awake → More → Revoke Passwordless Access**,
 or manually:
