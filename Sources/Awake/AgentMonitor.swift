@@ -335,6 +335,7 @@ final class AgentMonitor {
     static func isCodexDesktopAppServerCommand(_ command: String) -> Bool {
         let lc = command.lowercased()
         return lc.contains("/codex.app/contents/resources/codex app-server")
+            || lc == "codex app-server"
     }
 
     static func isCodexDesktopAgentWorkerCommand(_ command: String) -> Bool {
@@ -396,11 +397,17 @@ final class AgentMonitor {
 
         for pid in appServerPids {
             let tree = descendants(of: pid, in: childrenOf)
+            let appServerCpu = processes[pid]?.cpuPercent ?? 0
+            let hasActiveAppServer = appServerCpu >= codexDesktopOwnerCpuThreshold
             let hasTurnScopedWorker = tree.contains { workerPid in
                 guard workerPid != pid else { return false }
                 return isCodexDesktopAgentWorkerCommand(processes[workerPid]?.command ?? "")
             }
-            if hasTurnScopedWorker {
+            // This owner probe is only used when a fresh ~/.codex transcript write
+            // has already happened. App-server CPU is too broad for direct process
+            // detection, but it is useful for attributing that fresh write to the
+            // desktop app instead of leaving Codex Desktop invisible mid-turn.
+            if hasActiveAppServer || hasTurnScopedWorker {
                 owners.insert(.codexDesktop)
             }
         }

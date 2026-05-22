@@ -41,6 +41,8 @@ final class AgentMonitorTests: XCTestCase {
         XCTAssertNil(AgentMonitor.candidate(for: command, enabledTools: [.codexDesktop]))
         XCTAssertNil(AgentMonitor.candidate(for: command, enabledTools: [.codex]))
         XCTAssertTrue(AgentMonitor.isCodexDesktopAppServerCommand(command))
+        XCTAssertTrue(AgentMonitor.isCodexDesktopAppServerCommand("codex app-server"))
+        XCTAssertNil(AgentMonitor.candidate(for: "codex app-server", enabledTools: [.codex]))
     }
 
     func testDoesNotDetectCodexDesktopWhenOnlyCLIIsEnabled() {
@@ -113,7 +115,7 @@ final class AgentMonitorTests: XCTestCase {
         XCTAssertFalse(AgentMonitor.codexActivityOwners(psOutput: ps).contains(.codexDesktop))
     }
 
-    func testCodexActivityOwnersIgnoreBusyDesktopAppServerWithoutTurnWorker() {
+    func testCodexActivityOwnersUseBusyDesktopAppServerForTranscriptAttribution() {
         let ps = """
           100     1   0.0 /Applications/Codex.app/Contents/MacOS/Codex
           101   100   7.5 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled
@@ -121,7 +123,7 @@ final class AgentMonitorTests: XCTestCase {
           103   101   0.0 npm exec xcodebuildmcp@latest mcp
         """
 
-        XCTAssertFalse(AgentMonitor.codexActivityOwners(psOutput: ps).contains(.codexDesktop))
+        XCTAssertEqual(AgentMonitor.codexActivityOwners(psOutput: ps), [.codexDesktop])
     }
 
     func testCodexActivityOwnersIgnoreDesktopPersistentChildren() {
