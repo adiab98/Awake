@@ -46,9 +46,16 @@ final class LogActivityWatcher {
     }
 
     private var stream: FSEventStreamRef?
+    private enum RootKind {
+        case generic
+        case claudeCodeSessions
+        case claudeLocalAgentMode
+    }
+
     private struct Root {
         let path: String
         let sources: [Source]
+        let kind: RootKind
     }
 
     private var roots: [Root] = []
@@ -66,18 +73,20 @@ final class LogActivityWatcher {
         // refreshRoots (and the retry timer catches creation later).
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         rootSpecs = [
-            Root(path: "\(home)/.claude/projects", sources: [.claude]),
+            Root(path: "\(home)/.claude/projects", sources: [.claude], kind: .generic),
             Root(
                 path: "\(home)/Library/Application Support/Claude/claude-code-sessions",
-                sources: [.claudeDesktop]
+                sources: [.claudeDesktop],
+                kind: .claudeCodeSessions
             ),
             Root(
                 path: "\(home)/Library/Application Support/Claude/local-agent-mode-sessions",
-                sources: [.claudeDesktop]
+                sources: [.claudeDesktop],
+                kind: .claudeLocalAgentMode
             ),
-            Root(path: "\(home)/.codex/sessions", sources: [.codex, .codexDesktop]),
-            Root(path: "\(home)/.local/share/opencode/sessions", sources: [.opencode]),
-            Root(path: "\(home)/.config/opencode/sessions", sources: [.opencode]),
+            Root(path: "\(home)/.codex/sessions", sources: [.codex, .codexDesktop], kind: .generic),
+            Root(path: "\(home)/.local/share/opencode/sessions", sources: [.opencode], kind: .generic),
+            Root(path: "\(home)/.config/opencode/sessions", sources: [.opencode], kind: .generic),
         ]
         refreshRoots()
     }
@@ -188,9 +197,9 @@ final class LogActivityWatcher {
     }
 
     private func handleEvent(forPath p: String, flags: FSEventStreamEventFlags) {
-        guard Self.isTranscriptActivityPath(p, flags: flags) else { return }
         let enabled = enabledTools
         for root in rootsSnapshot() where p.hasPrefix(root.path) {
+            guard Self.isTranscriptActivityPath(p, flags: flags, rootKind: root.kind) else { return }
             let sources = sources(for: root, enabled: enabled)
             guard !sources.isEmpty else { return }
             for source in sources {
@@ -207,6 +216,36 @@ final class LogActivityWatcher {
         }
         let lower = path.lowercased()
         return lower.hasSuffix(".json") || lower.hasSuffix(".jsonl")
+    }
+
+    static func isClaudeDesktopTranscriptActivityPath(
+        _ path: String,
+        flags: FSEventStreamEventFlags = 0
+    ) -> Bool {
+        let lower = path.lowercased()
+        if lower.contains("/local-agent-mode-sessions/") {
+            guard isTranscriptActivityPath(path, flags: flags) else { return false }
+            return lower.contains("/.claude/projects/") && lower.hasSuffix(".jsonl")
+        }
+        if lower.contains("/claude-code-sessions/") {
+            guard isTranscriptActivityPath(path, flags: flags) else { return false }
+            let filename = URL(fileURLWithPath: path).lastPathComponent.lowercased()
+            return filename.hasPrefix("local_") && filename.hasSuffix(".json")
+        }
+        return false
+    }
+
+    private static func isTranscriptActivityPath(
+        _ path: String,
+        flags: FSEventStreamEventFlags,
+        rootKind: RootKind
+    ) -> Bool {
+        switch rootKind {
+        case .generic:
+            return isTranscriptActivityPath(path, flags: flags)
+        case .claudeCodeSessions, .claudeLocalAgentMode:
+            return isClaudeDesktopTranscriptActivityPath(path, flags: flags)
+        }
     }
 
     private func sources(for root: Root, enabled: Set<AgentTool>) -> [Source] {

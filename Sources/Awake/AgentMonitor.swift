@@ -296,11 +296,7 @@ final class AgentMonitor {
             return nil
         }
 
-        if Self.isClaudeDesktopAgentCommand(command) {
-            return enabled.contains(.claudeDesktop)
-                ? ("claude desktop agent", .claudeApp)
-                : nil
-        }
+        if Self.isClaudeDesktopAgentCommand(command) { return nil }
         if Self.isCodexDesktopAppServerCommand(command) {
             return nil
         }

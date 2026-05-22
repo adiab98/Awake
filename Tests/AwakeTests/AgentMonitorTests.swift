@@ -11,13 +11,10 @@ final class AgentMonitorTests: XCTestCase {
         XCTAssertNil(AgentMonitor.candidate(for: command, enabledTools: [.claudeDesktop]))
     }
 
-    func testDetectsClaudeDesktopEmbeddedAgentWhenEnabled() {
+    func testDoesNotDetectClaudeDesktopEmbeddedAgentProcessAsTurn() {
         let command = "/Users/ahmed/Library/Application Support/Claude/claude-code/2.1.121/claude.app/Contents/MacOS/claude"
 
-        let candidate = AgentMonitor.candidate(for: command, enabledTools: [.claudeDesktop])
-
-        XCTAssertEqual(candidate?.kind, .claudeApp)
-        XCTAssertEqual(candidate?.label, "claude desktop agent")
+        XCTAssertNil(AgentMonitor.candidate(for: command, enabledTools: [.claudeDesktop]))
     }
 
     func testDoesNotDetectClaudeDesktopWhenOnlyCLIIsEnabled() {
@@ -186,7 +183,7 @@ final class AgentMonitorTests: XCTestCase {
         XCTAssertTrue(LogActivityWatcher.isTranscriptActivityPath(
             "/Users/ahmed/.codex/sessions/2026/05/05/rollout.jsonl"
         ))
-        XCTAssertTrue(LogActivityWatcher.isTranscriptActivityPath(
+        XCTAssertTrue(LogActivityWatcher.isClaudeDesktopTranscriptActivityPath(
             "/Users/ahmed/Library/Application Support/Claude/claude-code-sessions/local_123.json"
         ))
         XCTAssertFalse(LogActivityWatcher.isTranscriptActivityPath(
@@ -194,6 +191,27 @@ final class AgentMonitorTests: XCTestCase {
         ))
         XCTAssertFalse(LogActivityWatcher.isTranscriptActivityPath(
             "/Users/ahmed/.codex/sessions/2026/05/05/.DS_Store"
+        ))
+    }
+
+    func testClaudeDesktopTranscriptFilterIgnoresSessionMetadata() {
+        XCTAssertFalse(LogActivityWatcher.isClaudeDesktopTranscriptActivityPath(
+            "/Users/ahmed/Library/Application Support/Claude/claude-code-sessions/scheduled-tasks.json"
+        ))
+        XCTAssertFalse(LogActivityWatcher.isClaudeDesktopTranscriptActivityPath(
+            "/Users/ahmed/Library/Application Support/Claude/local-agent-mode-sessions/local_123.json"
+        ))
+        XCTAssertFalse(LogActivityWatcher.isClaudeDesktopTranscriptActivityPath(
+            "/Users/ahmed/Library/Application Support/Claude/local-agent-mode-sessions/audit.jsonl"
+        ))
+        XCTAssertFalse(LogActivityWatcher.isClaudeDesktopTranscriptActivityPath(
+            "/Users/ahmed/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/manifest.json"
+        ))
+    }
+
+    func testClaudeDesktopTranscriptFilterAcceptsLocalAgentProjectJsonl() {
+        XCTAssertTrue(LogActivityWatcher.isClaudeDesktopTranscriptActivityPath(
+            "/Users/ahmed/Library/Application Support/Claude/local-agent-mode-sessions/org/project/local_123/.claude/projects/-sessions-example/turn.jsonl"
         ))
     }
 
