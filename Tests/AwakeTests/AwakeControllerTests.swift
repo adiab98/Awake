@@ -413,6 +413,32 @@ final class AwakeControllerTests: XCTestCase {
         XCTAssertEqual(lid.lastSetValue, false)
     }
 
+    func testPowerStatusRefreshDoesNotStartOverlappingReads() async throws {
+        let reader = BlockingPowerStatusReader()
+        let controller = AwakeController(
+            power: MockPowerManager(),
+            powerStatusReader: reader,
+            lid: MockLidGuard(),
+            startServices: false
+        )
+
+        controller.refreshForPresentation()
+        try await waitUntil { reader.readCount == 1 }
+
+        controller.refreshForPresentation()
+        controller.refreshForPresentation()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(reader.readCount, 1)
+
+        reader.releaseNext()
+        try await waitUntil { controller.powerStatus.sleepDisabled == true }
+
+        controller.refreshForPresentation()
+        try await waitUntil { reader.readCount == 2 }
+        reader.releaseNext()
+    }
+
     func testThermalPressureStopsAwakeAndRestoresLidSleep() async throws {
         let power = MockPowerManager()
         let lid = MockLidGuard(status: .installed)
@@ -456,6 +482,20 @@ final class AwakeControllerTests: XCTestCase {
         XCTAssertEqual(lid.uninstallCalls, 1)
         XCTAssertEqual(controller.lidInstallStatus, .notInstalled)
         XCTAssertFalse(controller.lidGuardEnabled)
+    }
+}
+
+private func waitUntil(
+    timeout: TimeInterval = 1,
+    _ condition: @escaping () -> Bool
+) async throws {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() {
+        if Date() > deadline {
+            XCTFail("Condition was not met before timeout")
+            return
+        }
+        try await Task.sleep(nanoseconds: 10_000_000)
     }
 }
 
@@ -579,5 +619,28 @@ private final class MockLidGuard: LidGuarding, @unchecked Sendable {
         }
         lock.unlock()
         return setLowPowerModeResult
+    }
+}
+
+private final class BlockingPowerStatusReader: PowerStatusReading, @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var reads = 0
+
+    var readCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return reads
+    }
+
+    func read() -> PowerStatus {
+        lock.lock()
+        reads += 1
+        lock.unlock()
+        semaphore.wait()
+        return PowerStatus(sleepDisabled: true)
+    }
+
+    func releaseNext() {
+        semaphore.signal()
     }
 }

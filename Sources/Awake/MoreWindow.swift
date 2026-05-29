@@ -62,7 +62,37 @@ private struct MoreView: View {
 
     private var content: some View {
         VStack(spacing: 0) {
+            header
 
+            Divider()
+                .padding(.horizontal, 24)
+                .padding(.vertical, 14)
+
+            TabView {
+                ScrollView {
+                    settingsContent
+                        .padding(.bottom, 18)
+                }
+                .tabItem {
+                    Label("Settings", systemImage: "slider.horizontal.3")
+                }
+
+                ScrollView {
+                    powerContent
+                        .padding(.bottom, 18)
+                }
+                .tabItem {
+                    Label("Power", systemImage: "bolt.fill")
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var header: some View {
+        VStack(spacing: 0) {
             Image(systemName: "cup.and.saucer.fill")
                 .font(.system(size: 44, weight: .bold))
                 .foregroundStyle(Color.accentColor)
@@ -89,11 +119,11 @@ private struct MoreView: View {
                 .padding(.horizontal, 28)
                 .padding(.top, 6)
             #endif
+        }
+    }
 
-            Divider()
-                .padding(.horizontal, 24)
-                .padding(.vertical, 18)
-
+    private var settingsContent: some View {
+        VStack(spacing: 0) {
             VStack(spacing: 10) {
                 HStack {
                     Text("Launch Awake at login")
@@ -255,7 +285,140 @@ private struct MoreView: View {
                 .padding(.top, 24)
                 .padding(.bottom, 18)
         }
-        .frame(maxWidth: .infinity)
+    }
+
+    private var powerContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Power status")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("These are the macOS power values Awake uses or depends on when it keeps work running.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            PowerStatusGroup(title: "Awake controls", rows: awakeControlRows)
+            PowerStatusGroup(title: "macOS state", rows: macOSPowerRows)
+
+            #if !APP_STORE
+            if controller.powerStatus.sleepDisabled == true && !controller.lidGuardEnabled {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("SleepDisabled is on outside Awake's closed-lid toggle.")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.orange)
+                    Text("That means macOS will keep lid-close sleep disabled until it is restored, even though Awake is not currently managing closed-lid mode.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    restoreLidSleepButton
+                }
+            }
+            #endif
+
+            if let error = controller.powerStatus.error {
+                Text(error)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.top, 4)
+    }
+
+    private var awakeControlRows: [PowerStatusRow] {
+        [
+            PowerStatusRow(
+                title: "Awake session",
+                value: controller.isCaffeinated ? "active" : "inactive",
+                isActive: controller.isCaffeinated,
+                explanation: "Active means Awake is currently asking macOS to keep the computer from idling."
+            ),
+            PowerStatusRow(
+                title: "Wait for AI agent turn",
+                value: controller.waitForAgents ? "on" : "off",
+                isActive: controller.waitForAgents,
+                explanation: "When on, agent activity can start or extend Awake's sleep prevention automatically."
+            ),
+            PowerStatusRow(
+                title: "Stay awake with lid closed",
+                value: controller.lidGuardEnabled ? "on" : "off",
+                isActive: controller.lidGuardEnabled,
+                explanation: "When on, Awake can manage the SleepDisabled setting while an Awake session is active. Turning this off does not always clear a stale or external SleepDisabled value."
+            ),
+            PowerStatusRow(
+                title: "Keep display awake",
+                value: controller.preventDisplaySleep ? "on" : "off",
+                isActive: controller.preventDisplaySleep,
+                explanation: "When off, the display may turn off while the Mac keeps running in the background."
+            ),
+            PowerStatusRow(
+                title: "Passwordless lid toggle",
+                value: controller.lidPasswordlessReady ? "ready" : "not ready",
+                isActive: controller.lidPasswordlessReady,
+                explanation: "Ready means Awake can change lid-close sleep without asking for your password each time."
+            )
+        ]
+    }
+
+    private var macOSPowerRows: [PowerStatusRow] {
+        let status = controller.powerStatus
+        return [
+            PowerStatusRow(
+                title: "SleepDisabled",
+                value: numericBool(status.sleepDisabled),
+                isActive: status.sleepDisabled,
+                explanation: "1 means macOS lid-close sleep is disabled system-wide; 0 means closing the lid normally puts the Mac to sleep."
+            ),
+            PowerStatusRow(
+                title: "PreventUserIdleSystemSleep",
+                value: numericBool(status.preventUserIdleSystemSleep),
+                isActive: status.preventUserIdleSystemSleep,
+                explanation: "1 means at least one process is preventing idle system sleep so CPU work can continue."
+            ),
+            PowerStatusRow(
+                title: "PreventSystemSleep",
+                value: numericBool(status.preventSystemSleep),
+                isActive: status.preventSystemSleep,
+                explanation: "1 means a process is requesting stronger system-sleep prevention while it is active."
+            ),
+            PowerStatusRow(
+                title: "PreventUserIdleDisplaySleep",
+                value: numericBool(status.preventUserIdleDisplaySleep),
+                isActive: status.preventUserIdleDisplaySleep,
+                explanation: "1 means something is keeping the screen lit; 0 means the screen is allowed to turn off."
+            ),
+            PowerStatusRow(
+                title: "lowpowermode",
+                value: numericBool(status.lowPowerMode),
+                isActive: status.lowPowerMode,
+                explanation: "Awake turns this on during closed-lid support, then restores the previous state when that support is turned off."
+            ),
+            PowerStatusRow(
+                title: "sleep",
+                value: minutes(status.systemSleepMinutes),
+                isActive: nil,
+                explanation: "The idle system-sleep timer in minutes. Active sleep assertions temporarily override it."
+            ),
+            PowerStatusRow(
+                title: "displaysleep",
+                value: minutes(status.displaySleepMinutes),
+                isActive: nil,
+                explanation: "The idle display-sleep timer in minutes. This can still run while the Mac itself stays awake."
+            )
+        ]
+    }
+
+    private func numericBool(_ value: Bool?) -> String {
+        guard let value else { return "unknown" }
+        return value ? "1" : "0"
+    }
+
+    private func minutes(_ value: Int?) -> String {
+        guard let value else { return "unknown" }
+        return value == 1 ? "1 minute" : "\(value) minutes"
     }
 
     #if !APP_STORE
@@ -302,6 +465,68 @@ private struct MoreView: View {
         }
     }
     #endif
+}
+
+private struct PowerStatusRow: Identifiable {
+    var id: String { title }
+    let title: String
+    let value: String
+    let isActive: Bool?
+    let explanation: String
+}
+
+private struct PowerStatusGroup: View {
+    let title: String
+    let rows: [PowerStatusRow]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(rows) { row in
+                    PowerStatusItem(row: row)
+                }
+            }
+        }
+    }
+}
+
+private struct PowerStatusItem: View {
+    let row: PowerStatusRow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 7, height: 7)
+                Text(row.title)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                Spacer(minLength: 8)
+                Text(row.value)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(statusColor)
+            }
+            Text(row.explanation)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 15)
+        }
+    }
+
+    private var statusColor: Color {
+        switch row.isActive {
+        case true:
+            return .green
+        case false:
+            return .secondary
+        case nil:
+            return .blue
+        }
+    }
 }
 
 private struct MoreMaterial: NSViewRepresentable {

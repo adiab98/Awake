@@ -125,6 +125,7 @@ final class AwakeController: ObservableObject {
     @Published private(set) var statusNotice: String?
     /// Last error from an install/uninstall attempt, surfaced in More.
     @Published private(set) var lidSetupError: String?
+    @Published private(set) var powerStatus: PowerStatus = .unknown
 
     /// Most recent FSEvents write timestamp per agent source.
     @Published private(set) var lastLogActivity: [LogActivityWatcher.Source: Date] = [:]
@@ -161,6 +162,7 @@ final class AwakeController: ObservableObject {
 
     private let power: PowerManaging
     private let safety: PowerSafetyMonitoring
+    private let powerStatusReader: PowerStatusReading
     private let agents = AgentMonitor()
     private let lid: LidGuarding
     private let logWatcher = LogActivityWatcher()
@@ -170,6 +172,7 @@ final class AwakeController: ObservableObject {
     private var statusNoticeTimer: Timer?
     private var thermalObserver: NSObjectProtocol?
     private var powerStateObserver: NSObjectProtocol?
+    private var powerStatusRefreshInFlight = false
     private var updatingLaunchAtLoginFromSystem = false
     private var applyingSafetyStop = false
 
@@ -185,11 +188,13 @@ final class AwakeController: ObservableObject {
     init(
         power: PowerManaging = PowerManager(),
         safety: PowerSafetyMonitoring = PowerSafetyMonitor(),
+        powerStatusReader: PowerStatusReading = PowerStatusReader(),
         lid: LidGuarding = LidGuard(),
         startServices: Bool = true
     ) {
         self.power = power
         self.safety = safety
+        self.powerStatusReader = powerStatusReader
         self.lid = lid
         self.enabledTools = Self.initialEnabledTools()
         // Seed install status synchronously. The probe is two `sudo -n -l` calls
@@ -919,9 +924,24 @@ final class AwakeController: ObservableObject {
 
     private func refreshExternalState() {
         refreshLaunchAtLogin()
+        refreshPowerStatus()
         #if !APP_STORE
         refreshLidState()
         #endif
+    }
+
+    private func refreshPowerStatus() {
+        guard !powerStatusRefreshInFlight else { return }
+        powerStatusRefreshInFlight = true
+        let reader = powerStatusReader
+        DispatchQueue.global(qos: .utility).async {
+            let status = reader.read()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.powerStatus = status
+                self.powerStatusRefreshInFlight = false
+            }
+        }
     }
 
     private func refreshLidState() {
