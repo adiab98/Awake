@@ -30,6 +30,9 @@ APP_NAME="Awake"
 BUNDLE_ID="com.diabdiab.awake"
 VERSION="0.1"
 BUILD_NUMBER="${BUILD_NUMBER:-3}"
+INSTALL_TO_APPLICATIONS="${INSTALL_TO_APPLICATIONS:-0}"
+SKIP_NOTARIZATION="${SKIP_NOTARIZATION:-0}"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 echo "▸ swift build -c $CONFIG (universal: arm64 + x86_64)"
 swift build -c "$CONFIG" --arch arm64 --arch x86_64
@@ -102,7 +105,8 @@ if [[ "$SIGNED_FOR_DISTRIBUTION" == "1" \
       && -n "${APPLE_ID:-}" \
       && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" \
       && -n "${TEAM_ID:-}" \
-      && "${APPLE_APP_SPECIFIC_PASSWORD}" != "$PLACEHOLDER" ]]; then
+      && "${APPLE_APP_SPECIFIC_PASSWORD}" != "$PLACEHOLDER" \
+      && "$SKIP_NOTARIZATION" != "1" ]]; then
   ZIP="build/${APP_NAME}-${VERSION}.zip"
   ditto -c -k --keepParent "$OUT" "$ZIP"
 
@@ -126,5 +130,22 @@ else
   echo "  Skipping notarization (set APPLE_ID and APPLE_APP_SPECIFIC_PASSWORD to enable)"
 fi
 
-echo "  Open with:  open $OUT"
-echo "  Or move to /Applications and launch from there."
+if [[ "$INSTALL_TO_APPLICATIONS" == "1" ]]; then
+  DEST="/Applications/$APP_NAME.app"
+  echo "▸ Installing ${DEST}"
+  rm -rf "$DEST"
+  cp -R "$OUT" "$DEST"
+  codesign --verify --deep --strict "$DEST"
+
+  if [[ -x "$LSREGISTER" ]]; then
+    "$LSREGISTER" -u "$OUT" 2>/dev/null || true
+    "$LSREGISTER" -f "$DEST" 2>/dev/null || true
+  fi
+
+  rm -rf "$OUT"
+  echo "✓ Installed ${DEST}"
+  echo "✓ Removed local build bundle so Launchpad only sees /Applications/${APP_NAME}.app"
+else
+  echo "  Open with:  open $OUT"
+  echo "  Or move to /Applications and launch from there."
+fi
