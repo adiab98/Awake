@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Darwin
 import os.log
 
 private let monitorLog = Logger(subsystem: "com.diabdiab.awake", category: "agent-monitor")
@@ -152,38 +153,23 @@ final class AgentMonitor {
         let selfPid = ProcessInfo.processInfo.processIdentifier
         let enabled = enabledTools
 
-        // Single ps invocation gives us pid, ppid, cumulative CPU time, current CPU%, command for ALL
-        // processes. We need the full table so we can build the descendant tree of each
-        // detected agent and sum CPU across the whole tree.
-        guard let psOut = capture("/bin/ps", ["-axww", "-o", "pid=,ppid=,time=,%cpu=,command="]) else {
-            return []
-        }
+        // Enumerate every process in-process via libproc instead of forking `ps`
+        // on every scan. Forking `ps -axww` ~20×/minute was the dominant energy
+        // cost — each fork+exec+pipe wakes the CPU and defeats idle power states.
+        // `proc_listpids` + `proc_pidinfo` + `KERN_PROCARGS2` return the same
+        // pid / ppid / cumulative-CPU / command data with no subprocess spawn.
+        let procs = Self.snapshotProcesses()
 
-        var procs: [Int32: ProcInfo] = [:]
         var childrenOf: [Int32: [Int32]] = [:]
         var candidatePids: [(pid: Int32, label: String, kind: DetectedAgent.Kind)] = []
         var codexDesktopServerPids: [Int32] = []
 
-        for line in psOut.split(separator: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            // pid ppid time %cpu command-with-spaces
-            let parts = trimmed.split(
-                maxSplits: 4,
-                omittingEmptySubsequences: true,
-                whereSeparator: { $0 == " " || $0 == "\t" }
-            )
-            guard parts.count == 5,
-                  let pid = Int32(parts[0]),
-                  let ppid = Int32(parts[1]),
-                  let cpuSec = parsePsTime(String(parts[2])),
-                  let cpuPercent = Double(String(parts[3])) else { continue }
-            let cmd = String(parts[4])
-
-            procs[pid] = ProcInfo(ppid: ppid, cpuSec: cpuSec, cpuPercent: cpuPercent, command: cmd)
-            childrenOf[ppid, default: []].append(pid)
+        for (pid, info) in procs {
+            childrenOf[info.ppid, default: []].append(pid)
 
             // Identify candidates (skip self and Awake helpers)
             guard pid != selfPid else { continue }
+            let cmd = info.command
             let cmdLower = cmd.lowercased()
             if cmdLower.contains("/awake") || cmdLower.contains("awake.app/contents") { continue }
 
@@ -612,6 +598,102 @@ final class AgentMonitor {
         return (processes, childrenOf)
     }
 
+    // MARK: - Process snapshot (in-process, no subprocess)
+
+    /// Mach time units → nanoseconds factor. `proc_pidinfo` reports CPU time in
+    /// mach absolute-time units (not nanoseconds), so convert with the host
+    /// timebase (e.g. 125/3 on Apple Silicon) to match `ps -o time`.
+    private static let machTimebase: mach_timebase_info_data_t = {
+        var tb = mach_timebase_info_data_t()
+        mach_timebase_info(&tb)
+        return tb
+    }()
+
+    /// Cumulative CPU seconds (user + system) from a libproc task-time pair.
+    private static func cpuSeconds(user: UInt64, system: UInt64) -> Double {
+        let tb = machTimebase
+        let denom = tb.denom == 0 ? 1 : tb.denom
+        return Double(user + system) * Double(tb.numer) / Double(denom) / 1_000_000_000.0
+    }
+
+    /// In-process snapshot of every readable process: pid → (ppid, cumulative CPU
+    /// seconds, command). The drop-in replacement for forking `ps`. `cpuPercent`
+    /// is always 0 here — recent CPU% is derived from cumulative-CPU deltas across
+    /// scans (see `detect()`), which is the primary signal; the instantaneous ps
+    /// `%cpu` was only ever a first-scan fallback.
+    private static func snapshotProcesses() -> [Int32: ProcInfo] {
+        let needed = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
+        guard needed > 0 else { return [:] }
+        let stride = MemoryLayout<pid_t>.stride
+        // Over-allocate so processes spawned between sizing and fill still fit.
+        let capacity = Int(needed) / stride + 64
+        var pids = [pid_t](repeating: 0, count: capacity)
+        let written = proc_listpids(UInt32(PROC_ALL_PIDS), 0, &pids, Int32(capacity * stride))
+        guard written > 0 else { return [:] }
+        let count = Int(written) / stride
+
+        var result: [Int32: ProcInfo] = [:]
+        result.reserveCapacity(count)
+        for i in 0..<count {
+            let pid = pids[i]
+            guard pid > 0 else { continue }
+            var info = proc_taskallinfo()
+            let size = Int32(MemoryLayout<proc_taskallinfo>.size)
+            guard proc_pidinfo(pid, PROC_PIDTASKALLINFO, 0, &info, size) == size else { continue }
+            let ppid = Int32(bitPattern: info.pbsd.pbi_ppid)
+            let cpuSec = cpuSeconds(user: info.ptinfo.pti_total_user,
+                                    system: info.ptinfo.pti_total_system)
+            let command = processCommand(pid: pid) ?? processPath(pid: pid) ?? ""
+            result[pid] = ProcInfo(ppid: ppid, cpuSec: cpuSec, cpuPercent: 0, command: command)
+        }
+        return result
+    }
+
+    /// Full command line (argv joined by spaces) for a pid via `KERN_PROCARGS2`,
+    /// matching the `ps -o command=` format the detection regexes expect. Returns
+    /// nil for processes we cannot read (other users, zombies, kernel tasks).
+    private static func processCommand(pid: pid_t) -> String? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var buf = [UInt8](repeating: 0, count: size)
+        let rc = buf.withUnsafeMutableBytes { raw in
+            sysctl(&mib, 3, raw.baseAddress, &size, nil, 0)
+        }
+        guard rc == 0, size >= MemoryLayout<Int32>.size else { return nil }
+        let argc = buf.withUnsafeBytes { $0.load(as: Int32.self) }
+        guard argc > 0 else { return nil }
+
+        // KERN_PROCARGS2 layout: argc, exec_path\0, \0-padding, argv[0]\0…argv[argc-1]\0, env…
+        var cursor = MemoryLayout<Int32>.size
+        while cursor < size && buf[cursor] != 0 { cursor += 1 }   // skip exec_path
+        while cursor < size && buf[cursor] == 0 { cursor += 1 }   // skip padding
+
+        var args: [String] = []
+        var start = cursor
+        var read = 0
+        while cursor < size && read < Int(argc) {
+            if buf[cursor] == 0 {
+                args.append(String(decoding: buf[start..<cursor], as: UTF8.self))
+                read += 1
+                cursor += 1
+                start = cursor
+            } else {
+                cursor += 1
+            }
+        }
+        return args.isEmpty ? nil : args.joined(separator: " ")
+    }
+
+    /// Executable path fallback when `KERN_PROCARGS2` is unavailable.
+    private static func processPath(pid: pid_t) -> String? {
+        let maxSize: Int32 = 4 * 1024 // 4 * MAXPATHLEN
+        var buf = [CChar](repeating: 0, count: Int(maxSize))
+        guard proc_pidpath(pid, &buf, UInt32(maxSize)) > 0 else { return nil }
+        let path = String(cString: buf)
+        return path.isEmpty ? nil : path
+    }
+
     // MARK: - Process helpers
 
     private static func captureOutput(_ path: String, _ args: [String]) -> String? {
@@ -644,31 +726,5 @@ final class AgentMonitor {
         _ = err.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
         return String(data: data, encoding: .utf8)
-    }
-
-    /// Parse `ps -o time=` output. Formats: `MM:SS.ss`, `HH:MM:SS`, `D-HH:MM:SS`.
-    private func parsePsTime(_ s: String) -> Double? {
-        var working = s
-        var days: Double = 0
-        if let dash = working.firstIndex(of: "-") {
-            days = Double(working[..<dash]) ?? 0
-            working = String(working[working.index(after: dash)...])
-        }
-        let rawParts = working.split(separator: ":")
-        let parts = rawParts.compactMap { Double($0) }
-        guard parts.count == rawParts.count else { return nil }
-        var seconds: Double = 0
-        switch parts.count {
-        case 3:
-            let h = parts[0], m = parts[1], s = parts[2]
-            seconds = h * 3600 + m * 60 + s
-        case 2:
-            seconds = parts[0] * 60 + parts[1]
-        case 1:
-            seconds = parts[0]
-        default:
-            return nil
-        }
-        return days * 86400 + seconds
     }
 }
