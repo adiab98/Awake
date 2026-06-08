@@ -546,8 +546,11 @@ final class AwakeController: ObservableObject {
     }
 
     /// User clicked the main "Awake" toggle. ON = engage manual. OFF = release manual,
-    /// AND also turn off agent-wait so the user actually gets what they asked for
-    /// (otherwise turning off would silently re-engage on the next agent activity).
+    /// AND also turn off the things that would otherwise keep the Mac awake (or hold
+    /// state) behind the user's back: agent-wait (would silently re-engage on the next
+    /// agent activity) and the closed-lid guard (keeps Low Power Mode + the pmset
+    /// override on until explicitly turned off). Turning the master switch off should
+    /// mean "let my Mac sleep normally."
     func userToggleAwake(on: Bool) {
         if on {
             startManual()
@@ -558,9 +561,11 @@ final class AwakeController: ObservableObject {
             if waitForAgents {
                 waitForAgents = false
                 setStatusNotice("Agent waiting turned off.")
-            } else {
-                sync()
             }
+            if lidGuardEnabled {
+                userToggleLidGuard(on: false)
+            }
+            sync()
         }
     }
 
@@ -773,6 +778,10 @@ final class AwakeController: ObservableObject {
     /// toggle stays OFF and an error is surfaced.
     func userToggleLidGuard(on: Bool) {
         if on {
+            // Closed-lid guard only makes sense while Awake is keeping the Mac up.
+            // Don't let it engage (or kick off an install prompt) when the master
+            // switch is off — the menu disables the toggle, this guards every path.
+            guard isCaffeinated else { return }
             if lidInstallStatus == .installed {
                 if enableLowPowerModeForLidGuard() {
                     lidGuardEnabled = true

@@ -182,9 +182,15 @@ struct MenuView: View {
                     isOn: Binding(
                         get: { controller.lidGuardEnabled },
                         set: { controller.userToggleLidGuard(on: $0) }
-                    )
+                    ),
+                    isEnabled: controller.isCaffeinated
                 )
-                if !controller.lidPasswordlessReady {
+                if !controller.isCaffeinated {
+                    Text("Turn on Awake to use this.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if !controller.lidPasswordlessReady {
                     Text(controller.lidActionInFlight
                          ? "Waiting for password…"
                          : "First use asks for your password once.")
@@ -253,6 +259,7 @@ struct MenuView: View {
 private struct MenuToggle: View {
     let title: String
     let isOn: Binding<Bool>
+    var isEnabled: Bool = true
 
     var body: some View {
         HStack {
@@ -266,6 +273,8 @@ private struct MenuToggle: View {
                 .accessibilityLabel(title)
                 .accessibilityValue(isOn.wrappedValue ? "On" : "Off")
         }
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.45)
     }
 }
 
