@@ -234,6 +234,7 @@ struct MenuView: View {
             customTimerInput = ""
             customTimerError = nil
             controller.clearStatusNotice()
+            controller.menuDidClose()
         }
     }
 

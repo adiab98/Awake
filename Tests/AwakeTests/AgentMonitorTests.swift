@@ -1,5 +1,6 @@
 import XCTest
 import CoreServices
+import Darwin
 @testable import Awake
 
 final class AgentMonitorTests: XCTestCase {
@@ -217,33 +218,41 @@ final class AgentMonitorTests: XCTestCase {
         ))
     }
 
-    // MARK: - remoteIP parser
+    // MARK: - remoteIP from socket info
 
-    func testParsesIPv4Endpoint() {
-        let line = "node    1234 ahmed   34u  IPv4 0xabc      0t0  TCP 192.168.1.5:55432->17.253.144.10:443 (ESTABLISHED)"
-        XCTAssertEqual(AgentMonitor.remoteIP(from: line), "17.253.144.10")
+    func testRemoteIPFromIPv4Socket() {
+        var info = in_sockinfo()
+        info.insi_vflag = UInt8(INI_IPV4)
+        var addr = in_addr()
+        XCTAssertEqual(inet_pton(AF_INET, "17.253.144.10", &addr), 1)
+        info.insi_faddr.ina_46.i46a_addr4 = addr
+
+        XCTAssertEqual(AgentMonitor.remoteIP(from: info), "17.253.144.10")
     }
 
-    func testParsesBracketedIPv6Endpoint() {
-        let line = "node    1234 ahmed   34u  IPv6 0xabc      0t0  TCP [fe80::1]:55432->[2606:4700:4400:0:0:0:6810:0]:443 (ESTABLISHED)"
-        XCTAssertEqual(
-            AgentMonitor.remoteIP(from: line),
-            "2606:4700:4400:0:0:0:6810:0"
-        )
+    func testRemoteIPFromIPv6Socket() {
+        var info = in_sockinfo()
+        info.insi_vflag = UInt8(INI_IPV6)
+        var addr = in6_addr()
+        // Fully-specified address (no zero run) so the canonical form is exact.
+        XCTAssertEqual(inet_pton(AF_INET6, "2606:4700:4400:1:2:3:6810:5", &addr), 1)
+        info.insi_faddr.ina_6 = addr
+
+        XCTAssertEqual(AgentMonitor.remoteIP(from: info), "2606:4700:4400:1:2:3:6810:5")
     }
 
-    func testUnwrapsIPv4MappedIPv6() {
-        let line = "node    1234 ahmed   34u  IPv6 0xabc      0t0  TCP [::ffff:192.0.2.1]:55432->[::ffff:17.253.144.10]:443 (ESTABLISHED)"
-        XCTAssertEqual(AgentMonitor.remoteIP(from: line), "17.253.144.10")
+    func testRemoteIPUnwrapsIPv4MappedIPv6Socket() {
+        var info = in_sockinfo()
+        info.insi_vflag = UInt8(INI_IPV6)
+        var addr = in6_addr()
+        XCTAssertEqual(inet_pton(AF_INET6, "::ffff:17.253.144.10", &addr), 1)
+        info.insi_faddr.ina_6 = addr
+
+        XCTAssertEqual(AgentMonitor.remoteIP(from: info), "17.253.144.10")
     }
 
-    func testReturnsNilWhenNoArrow() {
-        let line = "node    1234 ahmed   34u  IPv4 0xabc      0t0  TCP *:8080 (LISTEN)"
-        XCTAssertNil(AgentMonitor.remoteIP(from: line))
-    }
-
-    func testReturnsNilOnUnportedFormatGracefully() {
-        XCTAssertNil(AgentMonitor.remoteIP(from: ""))
-        XCTAssertNil(AgentMonitor.remoteIP(from: "garbage"))
+    func testRemoteIPNilWhenNoAddressFamilyFlag() {
+        let info = in_sockinfo()   // insi_vflag == 0 → neither IPv4 nor IPv6
+        XCTAssertNil(AgentMonitor.remoteIP(from: info))
     }
 }

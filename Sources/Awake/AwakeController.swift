@@ -55,6 +55,7 @@ final class AwakeController: ObservableObject {
     @AppStorage("waitForAgents") var waitForAgents: Bool = false {
         didSet {
             if waitForAgents { clearStatusNotice() }
+            updateAgentScanning()
             sync()
         }
     }
@@ -175,6 +176,13 @@ final class AwakeController: ObservableObject {
     private var powerStatusRefreshInFlight = false
     private var updatingLaunchAtLoginFromSystem = false
     private var applyingSafetyStop = false
+    /// Background services are live (set once `startBackgroundServices` runs).
+    /// Guards the scanner start/stop so unit tests (`startServices: false`)
+    /// never spin up the real process monitor.
+    private var servicesStarted = false
+    /// True while the menu popover is on screen. The scanner runs while it's
+    /// open so the status display is live, then stops on close.
+    private var menuIsOpen = false
 
     /// Reentrancy guard for any privileged lid action (install, uninstall, fallback
     /// admin prompt). Modal AppleScript dialogs run off the main thread; this flag
@@ -395,7 +403,12 @@ final class AwakeController: ObservableObject {
         agents.onUpdate = { [weak self] list in
             Task { @MainActor in self?.handleAgents(list) }
         }
-        agents.start()
+        servicesStarted = true
+        // Don't scan unconditionally. The 3-second process scan only matters
+        // when the user opted into agent-waiting (it drives the sleep decision)
+        // or while the menu is open (it drives the status display). Running it
+        // 24/7 for data nobody reads was the app's largest idle-energy cost.
+        updateAgentScanning()
 
         logWatcher.onActivity = { [weak self] source in
             Task { @MainActor in
@@ -584,9 +597,30 @@ final class AwakeController: ObservableObject {
 
     /// Trigger immediate state refreshes used when the menu or settings window opens.
     func refreshForPresentation() {
+        menuIsOpen = true
+        updateAgentScanning()
         agents.scanNow()
         refreshExternalState()
         handleSafetyStateChanged()
+    }
+
+    /// The menu popover closed. Stop the process scanner unless agent-waiting is
+    /// on, which needs it running in the background.
+    func menuDidClose() {
+        menuIsOpen = false
+        updateAgentScanning()
+    }
+
+    /// Run the process scanner only while it's needed — when agent-waiting is on
+    /// or the menu is open — and stop it otherwise so it isn't scanning every
+    /// process every few seconds around the clock.
+    private func updateAgentScanning() {
+        guard servicesStarted else { return }
+        if waitForAgents || menuIsOpen {
+            agents.start()
+        } else {
+            agents.stop()
+        }
     }
 
     func handleSafetyStateChanged() {

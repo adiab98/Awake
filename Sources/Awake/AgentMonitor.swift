@@ -107,8 +107,8 @@ final class AgentMonitor {
     )
 
     func start(interval: TimeInterval = 3.0) {
+        guard timer == nil else { return }   // already scanning — no-op
         monitorLog.debug("start: interval=\(interval, privacy: .public)")
-        timer?.invalidate()
         refreshAPIHostIPs()
         scan()
         let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
@@ -127,6 +127,9 @@ final class AgentMonitor {
     func stop() {
         timer?.invalidate(); timer = nil
         hostRefreshTimer?.invalidate(); hostRefreshTimer = nil
+        // Drop CPU-delta history so a later restart doesn't compute a bogus
+        // rate across the stopped gap. Mutated only on `queue` (see detect()).
+        queue.async { [weak self] in self?.lastTreeCpuSample.removeAll() }
     }
 
     func scanNow() { scan() }
@@ -433,6 +436,13 @@ final class AgentMonitor {
     /// API response" — claude/codex sit at 0% CPU during model thinking but
     /// the HTTPS connection to api.anthropic.com / api.openai.com stays open.
     ///
+    /// Enumerates each pid's open sockets in-process via libproc
+    /// (`proc_pidinfo` + `proc_pidfdinfo`) instead of forking `lsof` on every
+    /// scan. Forking `lsof -i` ~20×/minute — and it walks the entire system
+    /// socket table on each call — was the dominant energy cost; this reads
+    /// only the handful of fds owned by the agent tree and never spawns a
+    /// subprocess.
+    ///
     /// The allowlist is critical for Cursor: its UI keeps connections to
     /// settings/sync/telemetry endpoints open continuously, which would
     /// false-positive a naive "any non-localhost TCP" check.
@@ -440,48 +450,79 @@ final class AgentMonitor {
         guard !treePids.isEmpty else { return false }
         let allowlist = apiHostIPs
         guard !allowlist.isEmpty else { return false }
-        let pidArg = treePids.map(String.init).joined(separator: ",")
-        // -i: network files, -nP: skip DNS/service lookups (fast),
-        // -sTCP:ESTABLISHED: only currently-open connections, -p: filter to these pids.
-        guard let out = capture("/usr/sbin/lsof",
-            ["-i", "-nP", "-sTCP:ESTABLISHED", "-p", pidArg]) else { return false }
-        for line in out.split(separator: "\n") {
-            guard line.contains("ESTABLISHED") else { continue }
-            guard let remote = Self.remoteIP(from: String(line)) else { continue }
+        for pid in treePids {
+            if Self.hasEstablishedConnection(pid: pid, toAnyOf: allowlist) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// True if `pid` has at least one ESTABLISHED TCP socket whose remote IP is
+    /// in `allowlist`. Pure in-process libproc — no subprocess, no `lsof`.
+    private static func hasEstablishedConnection(
+        pid: Int32,
+        toAnyOf allowlist: Set<String>
+    ) -> Bool {
+        let needed = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+        guard needed > 0 else { return false }
+        let fdStride = MemoryLayout<proc_fdinfo>.stride
+        // Over-allocate so fds opened between sizing and fill still fit.
+        let capacity = Int(needed) / fdStride + 32
+        var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: capacity)
+        let filled = proc_pidinfo(
+            pid, PROC_PIDLISTFDS, 0, &fds, Int32(capacity * fdStride)
+        )
+        guard filled > 0 else { return false }
+        let count = min(Int(filled) / fdStride, capacity)
+
+        let infoSize = Int32(MemoryLayout<socket_fdinfo>.size)
+        for i in 0..<count where fds[i].proc_fdtype == UInt32(PROX_FDTYPE_SOCKET) {
+            var info = socket_fdinfo()
+            guard proc_pidfdinfo(
+                pid, fds[i].proc_fd, PROC_PIDFDSOCKETINFO, &info, infoSize
+            ) == infoSize else { continue }
+            guard info.psi.soi_kind == SOCKINFO_TCP else { continue }
+            let tcp = info.psi.soi_proto.pri_tcp
+            guard tcp.tcpsi_state == TSI_S_ESTABLISHED else { continue }
+            guard let remote = remoteIP(from: tcp.tcpsi_ini) else { continue }
             if allowlist.contains(remote) { return true }
         }
         return false
     }
 
-    /// Extract the remote IP from an `lsof -nP` NAME column.
-    /// Examples (whitespace separated):
-    ///   ... TCP 192.168.1.5:55432->17.253.144.10:443 (ESTABLISHED)
-    ///   ... TCP [fe80::1]:55432->[2606:4700::6810]:443 (ESTABLISHED)
-    ///   ... TCP [::ffff:192.0.2.1]:55432->[::ffff:17.253.144.10]:443 (ESTABLISHED)
-    /// Returns the remote IP as the canonical form: bare v4 for v4 / v4-in-v6,
-    /// bare v6 (no brackets) otherwise.
-    static func remoteIP(from line: String) -> String? {
-        guard let arrow = line.range(of: "->") else { return nil }
-        let after = line[arrow.upperBound...]
-        // Take everything up to the first whitespace.
-        let endpoint = after.split(whereSeparator: { $0 == " " || $0 == "\t" }).first
-        guard var ep = endpoint.map(String.init) else { return nil }
-
-        // Bracketed IPv6: "[addr]:port" — strip brackets and trailing :port.
-        if ep.hasPrefix("[") {
-            guard let close = ep.firstIndex(of: "]") else { return nil }
-            ep = String(ep[ep.index(after: ep.startIndex)..<close])
-            // Unwrap IPv4-mapped form "::ffff:1.2.3.4" → "1.2.3.4".
-            if let mapped = ep.range(of: "::ffff:", options: .caseInsensitive) {
-                return String(ep[mapped.upperBound...])
-            }
-            return ep
+    /// Foreign IP of a connected TCP socket as a canonical string matching the
+    /// `getnameinfo`/`inet_ntop` form `resolveHost` stores in the allowlist.
+    /// IPv4 and IPv4-mapped IPv6 ("::ffff:1.2.3.4") both collapse to bare v4.
+    static func remoteIP(from sockinfo: in_sockinfo) -> String? {
+        if sockinfo.insi_vflag & UInt8(INI_IPV4) != 0 {
+            var addr = sockinfo.insi_faddr.ina_46.i46a_addr4
+            return ipString(from: &addr, family: AF_INET, length: INET_ADDRSTRLEN)
         }
-        // Bare IPv4: "1.2.3.4:443" — strip :port.
-        if let colon = ep.lastIndex(of: ":") {
-            return String(ep[..<colon])
+        if sockinfo.insi_vflag & UInt8(INI_IPV6) != 0 {
+            var addr = sockinfo.insi_faddr.ina_6
+            guard let ip = ipString(
+                from: &addr, family: AF_INET6, length: INET6_ADDRSTRLEN
+            ) else { return nil }
+            // Unwrap IPv4-mapped form "::ffff:1.2.3.4" → "1.2.3.4".
+            if let mapped = ip.range(of: "::ffff:", options: .caseInsensitive) {
+                return String(ip[mapped.upperBound...])
+            }
+            return ip
         }
         return nil
+    }
+
+    private static func ipString(
+        from addr: UnsafeRawPointer,
+        family: Int32,
+        length: Int32
+    ) -> String? {
+        var buf = [CChar](repeating: 0, count: Int(length))
+        guard inet_ntop(family, addr, &buf, socklen_t(length)) != nil else {
+            return nil
+        }
+        return String(cString: buf)
     }
 
     /// Resolve `apiHostnames` via getaddrinfo and refresh the allowlist.
@@ -697,23 +738,6 @@ final class AgentMonitor {
     // MARK: - Process helpers
 
     private static func captureOutput(_ path: String, _ args: [String]) -> String? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = args
-        let out = Pipe()
-        let err = Pipe()
-        p.standardOutput = out
-        p.standardError = err
-        do { try p.run() } catch { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        _ = err.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return String(data: data, encoding: .utf8)
-    }
-
-    /// Run a binary and capture stdout. Drains stdout before waiting on exit so we don't
-    /// deadlock when the child writes more than the pipe buffer (~64KB).
-    private func capture(_ path: String, _ args: [String]) -> String? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = args
